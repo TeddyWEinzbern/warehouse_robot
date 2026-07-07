@@ -41,7 +41,7 @@ constexpr DriveMixing ACTIVE_DRIVE_MIXING = DriveMixing::Mecanum;
 ## Command Interface
 
 The sketch can read commands from USB serial, Bluetooth serial, or both. Change
-this constant in `src/main.cpp` when you want to switch:
+this constant in `src/Config.h` when you want to switch:
 
 ```cpp
 constexpr CommandInterface ACTIVE_COMMAND_INTERFACE = CommandInterface::Both;
@@ -87,18 +87,15 @@ Important notes:
   The sketch therefore applies a minimum moving PWM and a small rear-channel trim:
 
 ```cpp
-constexpr uint8_t MAX_MOTOR_PWM = 180;
-constexpr uint8_t FRONT_LEFT_MIN_PWM = 55;
-constexpr uint8_t FRONT_RIGHT_MIN_PWM = 55;
-constexpr uint8_t REAR_LEFT_MIN_PWM = 65;
-constexpr uint8_t REAR_RIGHT_MIN_PWM = 65;
-constexpr float REAR_LEFT_SPEED_SCALE = 1.08f;
-constexpr float REAR_RIGHT_SPEED_SCALE = 1.08f;
+constexpr MotorConfig FRONT_LEFT_MOTOR = {M1_PWM_PIN, M1_A_LATCH_BIT, M1_B_LATCH_BIT, false, 55, 180, 1.00f};
+constexpr MotorConfig FRONT_RIGHT_MOTOR = {M2_PWM_PIN, M2_A_LATCH_BIT, M2_B_LATCH_BIT, false, 55, 180, 1.00f};
+constexpr MotorConfig REAR_LEFT_MOTOR = {M3_PWM_PIN, M3_A_LATCH_BIT, M3_B_LATCH_BIT, false, 65, 180, 1.08f};
+constexpr MotorConfig REAR_RIGHT_MOTOR = {M4_PWM_PIN, M4_A_LATCH_BIT, M4_B_LATCH_BIT, false, 65, 180, 1.08f};
 ```
 
-  If M3/M4 still start later than M1/M2, raise only `REAR_LEFT_MIN_PWM` and
-  `REAR_RIGHT_MIN_PWM` in small steps such as `5`. If the rear wheels become too
-  fast after they are moving, lower only the rear speed scale values.
+  If M3/M4 still start later than M1/M2, raise only the rear motor `minPwm`
+  values in `src/Config.h` in small steps such as `5`. If the rear wheels
+  become too fast after they are moving, lower only the rear speed scale values.
 - Do not power motors from USB. Use the shield motor-power terminal or the
   shield's documented PWR jumper setup.
 - Arduino logic power and motor power must share GND. On this shield, that is
@@ -107,7 +104,7 @@ constexpr float REAR_RIGHT_SPEED_SCALE = 1.08f;
   Arduino VIN to motor power. For a separate motor battery, follow the board's
   markings and avoid back-powering USB.
 - If one motor spins the wrong direction, flip only that motor's polarity flag
-  in `src/main.cpp`:
+  in `src/Config.h`:
 
 ```cpp
 constexpr bool FRONT_LEFT_REVERSE_POLARITY = false;
@@ -175,6 +172,58 @@ Stop with `Ctrl+C`. The bridge resends the current command every 100 ms, so a
 held stick or trigger keeps moving the motors. When the Arduino stops receiving
 commands for 300 ms, it automatically stops all L293D outputs.
 
+## Project Structure
+
+- `src/main.cpp`: minimal Arduino entry point; creates the robot controller and calls `begin()` / `update()`.
+- `src/Config.h`: pins, serial baud rates, command interface, drive mixing, watchdog timing, and per-motor PWM/direction/scale settings.
+- `src/SerialProtocol.*`: newline-terminated `C:`, `W:`, and `M:` command reading, parsing, clamping, and buffer overflow handling.
+- `src/InputMapper.*`: translation point from parsed input commands into robot commands. It is intentionally small now so future button mappings or safety interlocks have one place to live.
+- `src/MotorController.*`: L293D V1 shield latch/PWM control, tank/mecanum mixing, per-wheel output, and stop behavior.
+- `src/RobotController.*`: high-level update loop, USB/Bluetooth stream handling, watchdog stop, command statistics, and debug output.
+- `src/State.h`: small shared enums and command structs.
+- `scripts/gamepad_motor.py`: minimal command-line entry point. It keeps serial/test options only.
+- `scripts/gamepad_config.py`: saved controller setup for joystick index, axis mapping, deadzones, curves, and output limits.
+- `scripts/gamepad_types.py`: small shared Python config/data types.
+- `scripts/gamepad_mapping.py`: axis normalization, curve presets, and `C:<forward>,<turn>,<strafe>` packing.
+- `scripts/gamepad_io.py`: pygame joystick setup, optional input monitor, and serial port helpers.
+
+## Gamepad Configuration
+
+The gamepad bridge no longer accepts axis, curve, deadzone, or joystick-selection
+settings as command-line flags. Save those settings in `scripts/gamepad_config.py`
+instead, then run the bridge with only serial options:
+
+```sh
+python3 scripts/gamepad_motor.py --port /dev/cu.usbmodemXXXX
+```
+
+The default saved configuration matches common Xbox SDL mappings on macOS:
+left stick X axis `0`, left stick Y axis `1`, LT axis `4`, and RT axis `5`.
+To tune the controller, edit the `GAMEPAD` object:
+
+```python
+GAMEPAD = GamepadConfig(
+    joystick_index=0,
+    command_rate_hz=30.0,
+    open_input_window=False,
+    monitor_only=False,
+    print_changed_commands=True,
+    axis_profiles={
+        "forward": AxisProfile(axis=1, input_range="signed", invert=True, deadzone=0.10, curve="expo", expo=0.45, max_output=0.85),
+        "turn": AxisProfile(axis=0, input_range="signed", curve="power", curve_power=1.6, max_output=0.70),
+        "left_trigger": AxisProfile(axis=4, input_range="auto-trigger"),
+        "right_trigger": AxisProfile(axis=5, input_range="auto-trigger"),
+    },
+)
+```
+
+Curve presets are `linear`, `expo`, `cubic`, `power`, and `ease`. Common input
+ranges are `signed` for sticks, `auto-trigger` for SDL trigger axes,
+`trigger-signed` for `-1..1` triggers, `trigger-unsigned` for `0..1` triggers,
+and `centered-positive` / `centered-negative` when both triggers share one
+centered axis. To inspect raw controller values without opening the serial port,
+set `monitor_only=True` in `scripts/gamepad_config.py` and run the script.
+
 ## Bluetooth Link Debugging
 
 The Arduino prints one debug line per second on USB serial when
@@ -233,33 +282,40 @@ python3 scripts/gamepad_motor.py --port /dev/cu.HC-05-DevB --baud 9600 --send-co
 
 ## Gamepad Axis Debugging
 
-If the controls do not match your controller, first monitor the raw axes:
+If the controls do not match your controller, first monitor the raw axes by
+editing `scripts/gamepad_config.py`:
 
-```sh
-python3 scripts/gamepad_motor.py --monitor --rate 10
+```python
+GAMEPAD = GamepadConfig(
+    joystick_index=0,
+    command_rate_hz=10.0,
+    open_input_window=True,
+    monitor_only=True,
+    print_changed_commands=True,
+    axis_profiles={...},
+)
 ```
 
-Move the left stick and both triggers, then map the changing axis numbers:
+Then run the script. It will print raw axes and buttons without opening the
+serial port:
 
 ```sh
-python3 scripts/gamepad_motor.py \
-  --port /dev/cu.usbmodemXXXX \
-  --left-x-axis 0 \
-  --left-y-axis 1 \
-  --left-trigger-axis 4 \
-  --right-trigger-axis 5
+python3 scripts/gamepad_motor.py --port /dev/cu.usbmodemXXXX
 ```
 
 The defaults match common Xbox SDL mappings on macOS: `left-x=0`, `left-y=1`,
-`left-trigger=4`, `right-trigger=5`. Some Xbox/pygame combinations instead put
-LT on axis `2`, so use `--monitor` once if LT still does not move.
+`left-trigger=4`, `right-trigger=5`. Some Xbox/pygame combinations put LT on
+axis `2`; if that is what the monitor shows, update only the relevant
+`AxisProfile(axis=...)` entry in `scripts/gamepad_config.py`.
 
 Some controllers report triggers as `-1..1`, others report `0..1`, and some
 report a centered axis where LT is negative and RT is positive. The default
-`--trigger-mode auto` handles these common cases, but you can force it:
+`input_range="auto-trigger"` handles common trigger ranges, but you can force it
+in the config:
 
-```sh
-python3 scripts/gamepad_motor.py --port /dev/cu.usbmodemXXXX --trigger-mode signed
-python3 scripts/gamepad_motor.py --port /dev/cu.usbmodemXXXX --trigger-mode unsigned
-python3 scripts/gamepad_motor.py --port /dev/cu.usbmodemXXXX --left-trigger-mode centered-negative --right-trigger-mode centered-positive
+```python
+"left_trigger": AxisProfile(axis=4, input_range="trigger-signed")
+"right_trigger": AxisProfile(axis=5, input_range="trigger-unsigned")
+"left_trigger": AxisProfile(axis=2, input_range="centered-negative")
+"right_trigger": AxisProfile(axis=2, input_range="centered-positive")
 ```
