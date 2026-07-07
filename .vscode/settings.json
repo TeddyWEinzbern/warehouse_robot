@@ -1,6 +1,0 @@
-{
-    "clangd.arguments": [
-        "--compile-commands-dir=/Users/wqy224491/VSCode Projects/1371/warehouse_robot",
-        "--query-driver=/Users/wqy224491/.platformio/packages/toolchain-atmelavr/bin/avr-*"
-    ]
-}
