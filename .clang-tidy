@@ -1,0 +1,12 @@
+Checks: >
+  bugprone-*,
+  performance-*,
+  readability-*,
+  -modernize-*,
+  clang-analyzer-*,
+  concurrency-*,
+  -bugprone-easily-swappable-parameters,
+  -readability-math-missing-parentheses,
+  -bugprone-branch-clone
+
+WarningsAsErrors: ''

@@ -1,0 +1,6 @@
+CompileFlags:
+  CompilationDatabase: .
+  Add:
+    - --target=avr
+    - -isystem/Users/wqy224491/.platformio/packages/toolchain-atmelavr/lib/gcc/avr/7.3.0/include-fixed
+    - -isystem/Users/wqy224491/.platformio/packages/toolchain-atmelavr/avr/include

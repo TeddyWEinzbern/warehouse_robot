@@ -1,0 +1,13 @@
+BasedOnStyle: Microsoft
+IndentWidth: 4
+UseTab: Never
+ColumnLimit: 80
+ContinuationIndentWidth: 4
+BreakBeforeBraces: Attach
+SpaceBeforeAssignmentOperators: true
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: BlockIndent
+MaxEmptyLinesToKeep: 1
+PointerAlignment: Right
+AllowAllParametersOfDeclarationOnNextLine: true 

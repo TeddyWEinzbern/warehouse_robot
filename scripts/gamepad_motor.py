@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge a computer-connected gamepad to an Arduino UART motor driver sketch."""
+"""Bridge a computer-connected gamepad to the Arduino L293D motor sketch."""
 
 from __future__ import annotations
 
@@ -7,13 +7,26 @@ import argparse
 import time
 
 HEARTBEAT_INTERVAL_SECONDS = 0.1
+DEFAULT_RAW_COMMAND_DURATION_SECONDS = 1.0
+DEFAULT_RAW_COMMAND_INTERVAL_SECONDS = 0.1
+TRIGGER_MODE_CHOICES = (
+    "auto",
+    "signed",
+    "signed-inverted",
+    "unsigned",
+    "unsigned-inverted",
+    "centered",
+    "centered-positive",
+    "centered-negative",
+)
 
 try:
     import pygame
 except ImportError as exc:
-    raise SystemExit(
-        "Missing dependency: pygame. Install with: python3 -m pip install pygame pyserial"
-    ) from exc
+    pygame = None
+    PYGAME_IMPORT_ERROR = exc
+else:
+    PYGAME_IMPORT_ERROR = None
 
 try:
     import serial
@@ -27,13 +40,17 @@ except ImportError as exc:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Send left-stick forward/turn and trigger strafe values to an Arduino "
-            "as C:<forward>,<turn>,<strafe> commands."
+            "Send left-stick forward/turn values to an Arduino as "
+            "C:<forward>,<turn>,<strafe> commands. Trigger strafe is only used "
+            "when the Arduino sketch is set to mecanum mixing."
         )
     )
     parser.add_argument(
         "--port",
-        help="Arduino serial port, for example /dev/cu.usbmodemXXXX or COM3.",
+        help=(
+            "Arduino USB or Bluetooth serial port, for example "
+            "/dev/cu.usbmodemXXXX, /dev/cu.HC-05-DevB, or COM3."
+        ),
     )
     parser.add_argument(
         "--list-ports",
@@ -55,8 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--left-trigger-axis",
         type=int,
-        default=2,
-        help="Left trigger axis for left strafe. Default: 2.",
+        default=4,
+        help="Left trigger axis for left strafe. Default: 4, matching common Xbox SDL mappings.",
     )
     parser.add_argument(
         "--right-trigger-axis",
@@ -66,9 +83,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trigger-mode",
-        choices=("auto", "signed", "unsigned"),
+        choices=TRIGGER_MODE_CHOICES,
         default="auto",
-        help="Trigger axis range: signed is -1..1, unsigned is 0..1. Default: auto.",
+        help="Default trigger axis range/direction. Default: auto.",
+    )
+    parser.add_argument(
+        "--left-trigger-mode",
+        choices=TRIGGER_MODE_CHOICES,
+        help="Override trigger mode for LT only. Defaults to --trigger-mode.",
+    )
+    parser.add_argument(
+        "--right-trigger-mode",
+        choices=TRIGGER_MODE_CHOICES,
+        help="Override trigger mode for RT only. Defaults to --trigger-mode.",
     )
     parser.add_argument(
         "--deadzone",
@@ -82,7 +109,12 @@ def parse_args() -> argparse.Namespace:
         default=30.0,
         help="Maximum commands per second. Default: 30.",
     )
-    parser.add_argument("--baud", type=int, default=115200, help="Arduino USB baud rate.")
+    parser.add_argument(
+        "--baud",
+        type=int,
+        default=115200,
+        help="Serial baud rate. USB defaults to 115200; HC-05/HC-06 usually uses 9600.",
+    )
     parser.add_argument(
         "--joystick",
         type=int,
@@ -93,6 +125,25 @@ def parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Print every command, even when unchanged.",
+    )
+    parser.add_argument(
+        "--send-command",
+        help=(
+            "Send one raw command such as C:400,0,0 repeatedly for --duration seconds, "
+            "then send C:0,0,0 and exit. This bypasses gamepad input."
+        ),
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=DEFAULT_RAW_COMMAND_DURATION_SECONDS,
+        help="Duration for --send-command in seconds. Default: 1.0.",
+    )
+    parser.add_argument(
+        "--repeat-interval",
+        type=float,
+        default=DEFAULT_RAW_COMMAND_INTERVAL_SECONDS,
+        help="Repeat interval for --send-command in seconds. Default: 0.1.",
     )
     return parser.parse_args()
 
@@ -114,13 +165,38 @@ def axis_to_command(value: float) -> int:
 def trigger_to_unit(value: float, mode: str) -> float:
     if mode == "signed":
         return clamp((value + 1.0) / 2.0, 0.0, 1.0)
+    if mode == "signed-inverted":
+        return clamp((1.0 - value) / 2.0, 0.0, 1.0)
+    if mode == "unsigned-inverted":
+        return clamp(-value, 0.0, 1.0)
+    if mode == "centered":
+        return clamp(abs(value), 0.0, 1.0)
+    if mode == "centered-positive":
+        return clamp(value, 0.0, 1.0)
+    if mode == "centered-negative":
+        return clamp(-value, 0.0, 1.0)
     return clamp(value, 0.0, 1.0)
+
+
+def apply_trigger_deadzone(value: float, deadzone: float) -> float:
+    if value < deadzone:
+        return 0.0
+    return clamp((value - deadzone) / (1.0 - deadzone), 0.0, 1.0)
 
 
 def resolve_trigger_mode(joystick: pygame.joystick.Joystick, axis: int, mode: str) -> str:
     if mode != "auto":
         return mode
-    return "signed" if joystick.get_axis(axis) < -0.1 else "unsigned"
+    resting_value = joystick.get_axis(axis)
+    if resting_value < -0.25:
+        return "signed"
+    if resting_value > 0.25:
+        return "signed-inverted"
+    return "centered"
+
+
+def resolve_requested_mode(specific_mode: str | None, default_mode: str) -> str:
+    return specific_mode or default_mode
 
 
 def format_available_ports() -> str:
@@ -130,7 +206,62 @@ def format_available_ports() -> str:
     return "\n".join(f"  {port.device} - {port.description}" for port in ports)
 
 
+def open_serial_port(port: str, baud: int) -> serial.Serial:
+    try:
+        return serial.Serial(port, baud, timeout=1)
+    except serial.SerialException as exc:
+        raise SystemExit(
+            f"Could not open serial port {port}: {exc}\n\n"
+            "Available serial ports:\n"
+            f"{format_available_ports()}\n\n"
+            "Use the Arduino USB port or Bluetooth serial port, usually "
+            "/dev/cu.usbmodem*, /dev/cu.usbserial*, or /dev/cu.HC-* on macOS."
+        ) from exc
+
+
+def normalize_raw_command(command: str) -> str:
+    command = command.strip()
+    if not command:
+        raise SystemExit("--send-command cannot be empty.")
+    return f"{command}\n"
+
+
+def send_raw_command(args: argparse.Namespace) -> int:
+    if not args.port:
+        raise SystemExit("Missing --port. Use --list-ports to see available serial ports.")
+    if args.duration <= 0:
+        raise SystemExit("--duration must be greater than 0.")
+    if args.repeat_interval <= 0:
+        raise SystemExit("--repeat-interval must be greater than 0.")
+
+    command = normalize_raw_command(args.send_command)
+    stop_command = "C:0,0,0\n"
+    deadline = time.monotonic() + args.duration
+
+    with open_serial_port(args.port, args.baud) as arduino:
+        print(
+            f"Sending {command.strip()} to {args.port} at {args.baud} baud "
+            f"for {args.duration:0.1f}s."
+        )
+        while time.monotonic() < deadline:
+            arduino.write(command.encode("ascii"))
+            arduino.flush()
+            time.sleep(args.repeat_interval)
+        arduino.write(stop_command.encode("ascii"))
+        arduino.flush()
+    print("Sent C:0,0,0 stop command.")
+    return 0
+
+
+def require_pygame() -> None:
+    if pygame is None:
+        raise SystemExit(
+            "Missing dependency: pygame. Install with: python3 -m pip install pygame pyserial"
+        ) from PYGAME_IMPORT_ERROR
+
+
 def open_joystick(index: int, use_window: bool) -> pygame.joystick.Joystick:
+    require_pygame()
     pygame.init()
     if use_window:
         pygame.display.set_mode((420, 140))
@@ -210,6 +341,9 @@ def main() -> int:
     if args.deadzone < 0 or args.deadzone >= 1:
         raise SystemExit("--deadzone must be at least 0 and less than 1.")
 
+    if args.send_command:
+        return send_raw_command(args)
+
     joystick = open_joystick(args.joystick, args.window)
 
     if args.monitor:
@@ -223,15 +357,7 @@ def main() -> int:
     validate_axis(joystick, args.left_trigger_axis, "Left trigger")
     validate_axis(joystick, args.right_trigger_axis, "Right trigger")
 
-    try:
-        arduino = serial.Serial(args.port, args.baud, timeout=1)
-    except serial.SerialException as exc:
-        raise SystemExit(
-            f"Could not open serial port {args.port}: {exc}\n\n"
-            "Available serial ports:\n"
-            f"{format_available_ports()}\n\n"
-            "Use the Arduino port, usually /dev/cu.usbmodem* or /dev/cu.usbserial* on macOS."
-        ) from exc
+    arduino = open_serial_port(args.port, args.baud)
 
     interval = 1.0 / args.rate
     last_command: str | None = None
@@ -239,11 +365,29 @@ def main() -> int:
 
     with arduino:
         time.sleep(2.0)
-        left_trigger_mode = resolve_trigger_mode(joystick, args.left_trigger_axis, args.trigger_mode)
-        right_trigger_mode = resolve_trigger_mode(joystick, args.right_trigger_axis, args.trigger_mode)
+        requested_left_trigger_mode = resolve_requested_mode(
+            args.left_trigger_mode, args.trigger_mode
+        )
+        requested_right_trigger_mode = resolve_requested_mode(
+            args.right_trigger_mode, args.trigger_mode
+        )
+        left_trigger_mode = resolve_trigger_mode(
+            joystick, args.left_trigger_axis, requested_left_trigger_mode
+        )
+        right_trigger_mode = resolve_trigger_mode(
+            joystick, args.right_trigger_axis, requested_right_trigger_mode
+        )
+        split_centered_trigger_axis = (
+            args.left_trigger_axis == args.right_trigger_axis
+            and left_trigger_mode == "centered"
+            and right_trigger_mode == "centered"
+        )
 
         print(f"Sending gamepad commands to {args.port} at {args.baud} baud. Press Ctrl+C to stop.")
-        print("Left stick Y = forward/back, left stick X = rotate, LT/RT = left/right strafe.")
+        print(
+            "Left stick Y = forward/back, left stick X = rotate. "
+            "LT/RT strafe is ignored by the Arduino unless mecanum mixing is enabled."
+        )
         print(f"Trigger modes: left={left_trigger_mode}, right={right_trigger_mode}.")
 
         while True:
@@ -254,12 +398,17 @@ def main() -> int:
             forward = -apply_deadzone(joystick.get_axis(args.left_y_axis), args.deadzone)
             turn = apply_deadzone(joystick.get_axis(args.left_x_axis), args.deadzone)
 
-            left_trigger = trigger_to_unit(
-                joystick.get_axis(args.left_trigger_axis), left_trigger_mode
-            )
-            right_trigger = trigger_to_unit(
-                joystick.get_axis(args.right_trigger_axis), right_trigger_mode
-            )
+            left_trigger_raw = joystick.get_axis(args.left_trigger_axis)
+            right_trigger_raw = joystick.get_axis(args.right_trigger_axis)
+            if split_centered_trigger_axis:
+                left_trigger = trigger_to_unit(left_trigger_raw, "centered-negative")
+                right_trigger = trigger_to_unit(right_trigger_raw, "centered-positive")
+            else:
+                left_trigger = trigger_to_unit(left_trigger_raw, left_trigger_mode)
+                right_trigger = trigger_to_unit(right_trigger_raw, right_trigger_mode)
+
+            left_trigger = apply_trigger_deadzone(left_trigger, args.deadzone)
+            right_trigger = apply_trigger_deadzone(right_trigger, args.deadzone)
             strafe = right_trigger - left_trigger
 
             command = (
@@ -289,4 +438,5 @@ if __name__ == "__main__":
         print("\nStopped.")
         raise SystemExit(0)
     finally:
-        pygame.quit()
+        if pygame is not None:
+            pygame.quit()
