@@ -72,8 +72,8 @@ M1/M2/M3/M4 terminals plus an onboard shift register for direction control.
 
 | Robot wheel | Shield terminal |
 | --- | --- |
-| Front left | M1 |
-| Front right | M2 |
+| Front left | M2 |
+| Front right | M1 |
 | Rear left | M3 |
 | Rear right | M4 |
 
@@ -87,8 +87,8 @@ Important notes:
   The sketch therefore applies a minimum moving PWM and a small rear-channel trim:
 
 ```cpp
-constexpr MotorConfig FRONT_LEFT_MOTOR = {M1_PWM_PIN, M1_A_LATCH_BIT, M1_B_LATCH_BIT, false, 55, 180, 1.00f};
-constexpr MotorConfig FRONT_RIGHT_MOTOR = {M2_PWM_PIN, M2_A_LATCH_BIT, M2_B_LATCH_BIT, false, 55, 180, 1.00f};
+constexpr MotorConfig FRONT_LEFT_MOTOR = {M2_PWM_PIN, M2_A_LATCH_BIT, M2_B_LATCH_BIT, false, 55, 180, 1.00f};
+constexpr MotorConfig FRONT_RIGHT_MOTOR = {M1_PWM_PIN, M1_A_LATCH_BIT, M1_B_LATCH_BIT, false, 55, 180, 1.00f};
 constexpr MotorConfig REAR_LEFT_MOTOR = {M3_PWM_PIN, M3_A_LATCH_BIT, M3_B_LATCH_BIT, false, 65, 180, 1.08f};
 constexpr MotorConfig REAR_RIGHT_MOTOR = {M4_PWM_PIN, M4_A_LATCH_BIT, M4_B_LATCH_BIT, false, 65, 180, 1.08f};
 ```
@@ -199,7 +199,8 @@ python3 scripts/gamepad_motor.py --port /dev/cu.usbmodemXXXX
 
 The default saved configuration matches common Xbox SDL mappings on macOS:
 left stick X axis `0`, left stick Y axis `1`, LT axis `4`, and RT axis `5`.
-To tune the controller, edit the `GAMEPAD` object:
+Xbox triggers are set to `input_range="trigger-signed"`, which means `-1` at
+rest and `+1` fully pressed. To tune the controller, edit the `GAMEPAD` object:
 
 ```python
 GAMEPAD = GamepadConfig(
@@ -211,18 +212,19 @@ GAMEPAD = GamepadConfig(
     axis_profiles={
         "forward": AxisProfile(axis=1, input_range="signed", invert=True, deadzone=0.10, curve="expo", expo=0.45, max_output=0.85),
         "turn": AxisProfile(axis=0, input_range="signed", curve="power", curve_power=1.6, max_output=0.70),
-        "left_trigger": AxisProfile(axis=4, input_range="auto-trigger"),
-        "right_trigger": AxisProfile(axis=5, input_range="auto-trigger"),
+        "left_trigger": AxisProfile(axis=4, input_range="trigger-signed"),
+        "right_trigger": AxisProfile(axis=5, input_range="trigger-signed"),
     },
 )
 ```
 
 Curve presets are `linear`, `expo`, `cubic`, `power`, and `ease`. Common input
-ranges are `signed` for sticks, `auto-trigger` for SDL trigger axes,
-`trigger-signed` for `-1..1` triggers, `trigger-unsigned` for `0..1` triggers,
-and `centered-positive` / `centered-negative` when both triggers share one
-centered axis. To inspect raw controller values without opening the serial port,
-set `monitor_only=True` in `scripts/gamepad_config.py` and run the script.
+ranges are `signed` for sticks, `trigger-signed` for Xbox-style `-1..1`
+triggers, `trigger-unsigned` for `0..1` triggers, `auto-trigger` when you want
+the script to guess, and `centered-positive` / `centered-negative` when both
+triggers share one centered axis. To inspect raw controller values without
+opening the serial port, set `monitor_only=True` in `scripts/gamepad_config.py`
+and run the script.
 
 ## Bluetooth Link Debugging
 

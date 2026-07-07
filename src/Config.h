@@ -59,26 +59,26 @@ constexpr uint8_t M4_A_LATCH_BIT = 0;
 constexpr uint8_t M4_B_LATCH_BIT = 6;
 
 constexpr uint8_t DEFAULT_MAX_MOTOR_PWM = 100;
-constexpr uint8_t DEFAULT_MIN_MOTOR_PWM = 20;
+constexpr uint8_t DEFAULT_MIN_MOTOR_PWM = 30;
 
-constexpr MotorConfig FRONT_LEFT_MOTOR = {
+constexpr MotorConfig FRONT_RIGHT_MOTOR = {
     M1_PWM_PIN,
     M1_A_LATCH_BIT,
     M1_B_LATCH_BIT,
     false,
     DEFAULT_MIN_MOTOR_PWM,
     DEFAULT_MAX_MOTOR_PWM,
-    1.00f,
+    1.00F,
 };
 
-constexpr MotorConfig FRONT_RIGHT_MOTOR = {
+constexpr MotorConfig FRONT_LEFT_MOTOR = {
     M2_PWM_PIN,
     M2_A_LATCH_BIT,
     M2_B_LATCH_BIT,
     false,
     DEFAULT_MIN_MOTOR_PWM,
     DEFAULT_MAX_MOTOR_PWM,
-    1.00f,
+    1.00F,
 };
 
 constexpr MotorConfig REAR_LEFT_MOTOR = {
@@ -88,7 +88,7 @@ constexpr MotorConfig REAR_LEFT_MOTOR = {
     false,
     DEFAULT_MIN_MOTOR_PWM,
     DEFAULT_MAX_MOTOR_PWM,
-    1.08f,
+    1.00F,
 };
 
 constexpr MotorConfig REAR_RIGHT_MOTOR = {
@@ -98,7 +98,7 @@ constexpr MotorConfig REAR_RIGHT_MOTOR = {
     false,
     DEFAULT_MIN_MOTOR_PWM,
     DEFAULT_MAX_MOTOR_PWM,
-    1.08f,
+    1.00F,
 };
 
 constexpr unsigned long COMMAND_TIMEOUT_MS = 300;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 from gamepad_types import AXIS_NAMES, CURVE_CHOICES, RANGE_CHOICES, AxisProfile, GamepadConfig
@@ -121,13 +122,33 @@ class GamepadMapper:
         self.joystick = joystick
         self.profiles = self._resolve_profiles(profiles)
 
+    def _sample_resting_axis(self, axis: int) -> float:
+        values = []
+        try:
+            import pygame
+        except ImportError:
+            return self.joystick.get_axis(axis)
+
+        # pygame can report 0 for joystick axes immediately after init until
+        # SDL has processed a few events. Sampling briefly makes auto-trigger
+        # detection much less likely to misclassify Xbox -1..+1 triggers.
+        deadline = time.monotonic() + 0.12
+        while time.monotonic() < deadline:
+            pygame.event.pump()
+            values.append(self.joystick.get_axis(axis))
+            time.sleep(0.01)
+
+        if not values:
+            return self.joystick.get_axis(axis)
+        return max(values, key=abs)
+
     def _resolve_profiles(self, profiles: dict[str, AxisProfile]) -> dict[str, AxisProfile]:
         resolved = dict(profiles)
         for name, profile in profiles.items():
             if profile.input_range != "auto-trigger":
                 continue
 
-            resting_value = self.joystick.get_axis(profile.axis)
+            resting_value = self._sample_resting_axis(profile.axis)
             if resting_value < -0.25:
                 input_range = "trigger-signed"
             elif resting_value > 0.25:

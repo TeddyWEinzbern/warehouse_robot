@@ -26,25 +26,32 @@ GAMEPAD = GamepadConfig(
             invert=True,
             deadzone=0.08,
             max_output=1.0,
-            curve="linear",
+            # sign(x) * x^1.5: gentler around center while keeping full output
+            # at the end of travel.
+            curve="power",
+            curve_power=1.5,
         ),
         "turn": AxisProfile(
             axis=0,
             input_range="signed",
             deadzone=0.08,
             max_output=1.0,
-            curve="linear",
+            curve="power",
+            curve_power=1.5,
         ),
         "left_trigger": AxisProfile(
             axis=4,
-            input_range="auto-trigger",
+            # Xbox controllers commonly expose each trigger as -1 at rest and
+            # +1 fully pressed. Keeping this explicit avoids startup auto-detect
+            # races where pygame has not reported the resting -1 value yet.
+            input_range="trigger-signed",
             deadzone=0.08,
             max_output=1.0,
             curve="linear",
         ),
         "right_trigger": AxisProfile(
             axis=5,
-            input_range="auto-trigger",
+            input_range="trigger-signed",
             deadzone=0.08,
             max_output=1.0,
             curve="linear",
