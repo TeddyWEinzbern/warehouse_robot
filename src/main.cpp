@@ -1,13 +1,8 @@
 #include <Arduino.h>
 
-#include "RobotController.h"
+#include "app/RobotApplication.h"
 
-RobotController robot;
+robot::RobotApplication application;
 
-void setup() {
-    robot.begin();
-}
-
-void loop() {
-    robot.update();
-}
+void setup() { application.begin(); }
+void loop() { application.update(); }

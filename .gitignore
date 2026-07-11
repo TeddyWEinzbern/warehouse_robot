@@ -1,4 +1,4 @@
-# shit
+# macOS
 .DS_Store
 
 # folders
@@ -9,8 +9,12 @@
 .vscode
 .venv
 
+examples/
+
 # python
 __pycache__
+.pytest_cache
+*.egg-info
 
 # settings
 compile_commands.json
