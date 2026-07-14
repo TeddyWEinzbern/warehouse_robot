@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
+import os
+from pathlib import Path
 import struct
+import sys
 import time
 
 from .config import CONTROL
@@ -11,6 +15,61 @@ from .input import monitor, open_joystick
 from .protocol import MessageType, ProtocolDecoder, encode_message
 from .runtime import RobotRuntime
 from .transport import SerialConnectionError, list_ports, open_port
+
+
+def _port_name(entry: str) -> str:
+    """Return the device portion of ``list_ports``' human-readable entries."""
+    return entry.partition(" - ")[0]
+
+
+def _windows_port_name(device: str) -> str:
+    """Normalize COM ports without applying POSIX filesystem semantics."""
+    normalized = device.strip().upper()
+    if normalized.startswith("\\\\.\\"):
+        normalized = normalized[4:]
+    return normalized
+
+
+def validate_serial_device(device: str, *, platform: str | None = None) -> None:
+    """Fail before runtime startup when a requested serial device is absent."""
+    if not device or not device.strip():
+        raise SerialConnectionError("serial device is required")
+
+    platform = platform or sys.platform
+    available = {_port_name(entry) for entry in list_ports()}
+
+    if platform == "win32":
+        requested = _windows_port_name(device)
+        available_windows = {_windows_port_name(port) for port in available}
+        if requested in available_windows:
+            return
+        raise SerialConnectionError(
+            f"serial device {device!r} is not available; run "
+            "'warehouse-robot list-ports' to see connected COM ports"
+        )
+
+    device_path = Path(device)
+    if device in available or (
+        device_path.is_absolute() and device_path.is_char_device()
+    ):
+        return
+
+    if platform == "darwin" and not device.startswith("/dev/"):
+        full_path = os.path.join("/dev", device)
+        if full_path in available or Path(full_path).is_char_device():
+            raise SerialConnectionError(
+                f"invalid macOS serial device {device!r}: use the full path "
+                f"{full_path!r} (the '/dev/' prefix is required)"
+            )
+        raise SerialConnectionError(
+            f"serial device {device!r} does not exist; macOS device names must use "
+            "the full '/dev/...' path. Run 'warehouse-robot list-ports' to find it"
+        )
+
+    raise SerialConnectionError(
+        f"serial device {device!r} is not an available serial character device; run "
+        "'warehouse-robot list-ports' to see connected devices"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +131,7 @@ def run(args: argparse.Namespace) -> int:
         monitor(pygame, joystick, 10.0)
         return 0
     if args.command == "calibrate-joint":
+        validate_serial_device(args.port)
         return calibrate_joint(args.port, args.joint, args.angle)
     if args.reconnect_attempts < 1 or not 1 <= args.web_port <= 65535:
         raise SystemExit("Reconnect attempts and web port must be positive")
@@ -79,16 +139,28 @@ def run(args: argparse.Namespace) -> int:
         from aiohttp import web
     except ImportError as exc:
         raise SystemExit("Missing aiohttp. Install with: python3 -m pip install -e .") from exc
-    from .web import create_app
+    from .web import create_app, reserve_dashboard_socket
 
-    runtime = RobotRuntime(
-        args.port,
-        args.baud,
-        use_gamepad=not args.no_gamepad,
-        maximum_reconnect_attempts=args.reconnect_attempts,
-    )
-    print(f"Dashboard: http://127.0.0.1:{args.web_port}")
-    web.run_app(create_app(runtime), host="127.0.0.1", port=args.web_port)
+    try:
+        dashboard_socket = reserve_dashboard_socket("127.0.0.1", args.web_port)
+    except OSError as exc:
+        raise SystemExit(
+            f"Dashboard port 127.0.0.1:{args.web_port} is unavailable: {exc}. "
+            "The robot runtime was not started."
+        ) from exc
+
+    # Reserve the listener before even enumerating serial devices: an occupied
+    # dashboard port must have no effect on the HC-05 or RobotRuntime.
+    with closing(dashboard_socket):
+        validate_serial_device(args.port)
+        runtime = RobotRuntime(
+            args.port,
+            args.baud,
+            use_gamepad=not args.no_gamepad,
+            maximum_reconnect_attempts=args.reconnect_attempts,
+        )
+        print(f"Dashboard: http://127.0.0.1:{args.web_port}")
+        web.run_app(create_app(runtime), sock=dashboard_socket)
     return 0
 
 
@@ -96,7 +168,7 @@ def main() -> int:
     try:
         return run(parse_args())
     except SerialConnectionError as exc:
-        print(f"Error: {exc}")
+        print(f"Error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130

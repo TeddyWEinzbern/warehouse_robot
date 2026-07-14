@@ -102,6 +102,7 @@ function render(data) {
   $("connection-dot").classList.toggle("online", connected);
   $("connection-label").textContent = connected ? "Link active" : "Link offline";
   $("device-label").textContent = `${data.device || "—"} · ${data.baud || "—"} baud`;
+  $("host-rate").textContent = `${data.control_rate_hz || "—"} Hz target`;
   $("robot-state").textContent = data.state_name || "UNKNOWN";
   $("build-profile").textContent = data.profile_name || "unknown";
   $("response-profile").textContent = responseNames[status.response_profile] || "—";

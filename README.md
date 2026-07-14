@@ -1,8 +1,8 @@
 # Warehouse Robot Control System
 
 Safety-oriented Arduino Uno firmware and a Python host console for a four-wheel
-mecanum warehouse robot. The default build is `safe_idle`; actuator-capable
-profiles must be selected explicitly.
+mecanum warehouse robot. Select the build profile explicitly when changing
+hardware backends; `safe_idle` remains the no-actuator bring-up profile.
 
 The UART drivetrain uses the motor board's own closed-loop speed controller:
 
@@ -20,10 +20,10 @@ normal UART profile refuses to arm while
 ## Runtime structure
 
 ```text
-Python gamepad (20 Hz) ─┐
-Local web dashboard ────┼─> host safety runtime ── protocol v2 ──> Arduino mailbox
-                        │                                      │
-                        └─ browser may disconnect safely       ├─ 10 ms chassis ramp
+Python gamepad (10/20 Hz) ─┐
+Local web dashboard ────────┼─> host safety runtime ── protocol v2 ──> Arduino mailbox
+                            │                                      │
+                            └─ browser may disconnect safely       ├─ 10 ms chassis ramp
                                                                ├─ 20 ms $Car: scheduler
 Motor-board UART RX ── fixed parser/query arbiter <────────────┼─ 20 ms encoder query
                                                                ├─ 20 ms servo trajectory
@@ -42,7 +42,7 @@ More detail is in [protocol-v2.md](docs/protocol-v2.md) and
 ## Build profiles
 
 ```sh
-# Default: no motor backend and no servo attachment
+# No motor backend and no servo attachment
 pio run -e safe_idle
 
 # Raised-wheel UART qualification, capped at 200 mm/s
@@ -55,15 +55,17 @@ pio run -e uart_closed_loop_robot
 pio run -e uart_open_loop_calibration
 pio run -e arm_calibration
 
-# Development shield backend
+# Development shield backend (current default_envs selection)
 pio run -e l293d_dev
 ```
 
-The HC-05 default is 38400 baud. Compatibility builds reduce firmware
-telemetry to 5 Hz and the host control stream to 10 Hz, without changing the
-Arduino's 20 ms motor schedule:
+The standard firmware profiles use 38400 baud, but the HC-05 data-mode baud must
+match the configured module. The 9600-baud compatibility profiles reduce
+firmware telemetry to 5 Hz and require the host's 9600-baud mode, which reduces
+its control stream to 10 Hz. The Arduino's 20 ms motor schedule is unchanged:
 
 ```sh
+pio run -e l293d_dev_9600
 pio run -e uart_closed_loop_qualification_9600
 pio run -e uart_closed_loop_robot_9600
 ```
@@ -82,7 +84,9 @@ warehouse-robot list-ports
 Run the safety runtime and loopback-only dashboard:
 
 ```sh
-warehouse-robot run --port /dev/cu.HC-05-DevB --baud 38400
+# Use the exact /dev/cu.HC-05... path reported by `warehouse-robot list-ports`.
+# This example requires l293d_dev_9600 or another matching 9600-baud profile.
+warehouse-robot run --port /dev/cu.HC-05 --baud 9600
 # Open http://127.0.0.1:8765
 ```
 
@@ -96,8 +100,9 @@ python3 -m PyInstaller warehouse_robot_gui.spec
 
 Use `--no-gamepad` for telemetry and disarmed calibration only. The browser is
 not in the control or safety path: closing it does not stop the Python runtime,
-the 20 Hz control stream, serial supervision, or E-stop handling. WebSocket
-clients receive coalesced immutable snapshots through one-element queues.
+the configured 10/20 Hz control stream, serial supervision, or E-stop handling.
+WebSocket clients receive coalesced immutable snapshots through one-element
+queues.
 
 The dashboard shows:
 
@@ -153,8 +158,9 @@ gates. Sonar and arm motion are disabled by the qualification profile.
 PYTHONPATH=scripts python3 -m unittest discover -s tests -v
 python3 -m compileall -q scripts tests
 pio test -e native
-pio run -e safe_idle -e l293d_dev \
+pio run -e safe_idle -e l293d_dev -e l293d_dev_9600 \
   -e uart_closed_loop_qualification -e uart_closed_loop_robot \
+  -e uart_closed_loop_qualification_9600 -e uart_closed_loop_robot_9600 \
   -e uart_open_loop_calibration -e arm_calibration
 ```
 

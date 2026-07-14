@@ -35,7 +35,10 @@ def open_port(device: str, baud: int):
             device,
             baud,
             timeout=0,
-            write_timeout=0.05,
+            # A 50 ms deadline is too aggressive for an RFCOMM-backed HC-05.
+            # The operating system may briefly buffer a complete protocol frame
+            # while the Bluetooth link is being scheduled or re-established.
+            write_timeout=0.5,
         )
     except (serial.SerialException, OSError) as exc:
         raise SerialConnectionError(f"could not open {device}: {exc}") from exc
