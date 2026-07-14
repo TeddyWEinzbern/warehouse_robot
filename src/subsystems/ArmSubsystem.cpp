@@ -1,5 +1,7 @@
 #include "subsystems/ArmSubsystem.h"
 
+#include <math.h>
+
 #include "app/BuildConfig.h"
 #include "app/PinProfile.h"
 #include "domain/ArmKinematics.h"
@@ -7,30 +9,44 @@
 namespace robot {
 namespace {
 float absFloat(float value) { return value < 0.0F ? -value : value; }
+
 float moveToward(float value, float target, float step) {
     if (target > value + step) return value + step;
     if (target < value - step) return value - step;
     return target;
 }
+
 uint8_t clampDegrees(float value) {
     if (value < 0.0F) return 0;
     if (value > 180.0F) return 180;
     return static_cast<uint8_t>(value + 0.5F);
 }
-}
+} // namespace
 
 ArmSubsystem::ArmSubsystem()
-    : current_({90.0F, config::StowReachMm, config::StowHeightMm, config::GripperOpenDegrees}),
-      goal_(current_), waypointCount_(0), waypointIndex_(0), cargoMayBeHeld_(false),
-      gripperCommandDegrees_(config::GripperOpenDegrees), lastUpdateMs_(0) {}
+    : current_({
+          90.0F, config::StowReachMm, config::StowHeightMm,
+          config::GripperOpenDegrees
+      }),
+      goal_(current_), waypointCount_(0), waypointIndex_(0),
+      cargoMayBeHeld_(false), holding_(false), faulted_(false),
+      currentGripperDegrees_(config::GripperOpenDegrees),
+      goalGripperDegrees_(config::GripperOpenDegrees),
+      lastCommandedDegrees_{0, 0, 0, 0} {}
 
-void ArmSubsystem::begin() {
+void ArmSubsystem::begin(const RuntimeConfig &runtime) {
     if (!calibrated()) return;
+    current_ = {
+        90.0F, static_cast<float>(runtime.arm.stowReachMm),
+        static_cast<float>(runtime.arm.stowHeightMm), config::GripperOpenDegrees
+    };
+    goal_ = current_;
+    currentGripperDegrees_ = goalGripperDegrees_ = config::GripperOpenDegrees;
     servos_[0].attach(pins::ServoBase);
     servos_[1].attach(pins::ServoShoulder);
     servos_[2].attach(pins::ServoElbow);
     servos_[3].attach(pins::ServoGripper);
-    applyServos();
+    faulted_ = !applyServos(runtime);
 }
 
 float ArmSubsystem::clampFloat(float value, float low, float high) {
@@ -39,19 +55,39 @@ float ArmSubsystem::clampFloat(float value, float low, float high) {
     return value;
 }
 
-void ArmSubsystem::applyServos() {
+uint8_t ArmSubsystem::mapJoint(
+    uint8_t joint, float offsetFromCenter, const RuntimeConfig &runtime
+) const {
+    const ServoCalibration &calibration = runtime.servos[joint];
+    const float center = 90.0F + calibration.centerOffsetDegrees;
+    return clampDegrees(clampFloat(
+        center + calibration.direction * offsetFromCenter,
+        calibration.lowerDegrees,
+        calibration.upperDegrees
+    ));
+}
+
+bool ArmSubsystem::applyServos(const RuntimeConfig &runtime) {
     const JointSolution solution = ArmKinematics::solvePlanar(
         current_.reachMm,
-        current_.heightMm - config::ShoulderBaseHeightMm,
-        config::FirstLinkMm,
-        config::SecondLinkMm
+        current_.heightMm - runtime.arm.shoulderBaseHeightMm,
+        runtime.arm.firstLinkMm,
+        runtime.arm.secondLinkMm
     );
-    servos_[0].write(clampDegrees(config::BaseZeroDegrees + current_.yawDegrees - 90.0F));
-    if (solution.reachable) {
-        servos_[1].write(clampDegrees(config::ShoulderZeroDegrees + solution.shoulderDegrees));
-        servos_[2].write(clampDegrees(config::ElbowZeroDegrees + solution.elbowDegrees));
+    if (!solution.reachable || !isfinite(solution.shoulderDegrees) ||
+        !isfinite(solution.elbowDegrees)) return false;
+
+    const uint8_t commands[4] = {
+        mapJoint(0, current_.yawDegrees - 90.0F, runtime),
+        mapJoint(1, solution.shoulderDegrees, runtime),
+        mapJoint(2, solution.elbowDegrees, runtime),
+        mapJoint(3, currentGripperDegrees_ - config::GripperOpenDegrees, runtime),
+    };
+    for (uint8_t joint = 0; joint < 4; ++joint) {
+        servos_[joint].write(commands[joint]);
+        lastCommandedDegrees_[joint] = commands[joint];
     }
-    servos_[3].write(current_.gripperDegrees);
+    return true;
 }
 
 bool ArmSubsystem::stepTowardGoal(float elapsedSeconds) {
@@ -60,108 +96,177 @@ bool ArmSubsystem::stepTowardGoal(float elapsedSeconds) {
     current_.yawDegrees = moveToward(current_.yawDegrees, goal_.yawDegrees, angularStep);
     current_.reachMm = moveToward(current_.reachMm, goal_.reachMm, linearStep);
     current_.heightMm = moveToward(current_.heightMm, goal_.heightMm, linearStep);
-    current_.gripperDegrees = static_cast<uint8_t>(moveToward(
-        current_.gripperDegrees, goal_.gripperDegrees, angularStep
-    ));
+    currentGripperDegrees_ = moveToward(
+        currentGripperDegrees_, goalGripperDegrees_, angularStep
+    );
+    current_.gripperDegrees = clampDegrees(currentGripperDegrees_);
     return absFloat(current_.yawDegrees - goal_.yawDegrees) < 0.5F &&
            absFloat(current_.reachMm - goal_.reachMm) < 0.5F &&
            absFloat(current_.heightMm - goal_.heightMm) < 0.5F &&
-           current_.gripperDegrees == goal_.gripperDegrees;
+           absFloat(currentGripperDegrees_ - goalGripperDegrees_) < 0.5F;
 }
 
-void ArmSubsystem::planTo(const ArmTarget &target, bool stowing) {
+void ArmSubsystem::planTo(
+    const ArmTarget &target, bool stowing, const RuntimeConfig &runtime
+) {
     waypointCount_ = 0;
     waypointIndex_ = 0;
     const bool needsClearance = cargoMayBeHeld_ &&
-        (stowing || current_.heightMm < config::CargoClearanceHeightMm);
+        (stowing || current_.heightMm < runtime.arm.cargoClearanceHeightMm);
     const bool directSafe = !needsClearance &&
-        current_.heightMm >= config::MinHeightMm && current_.reachMm >= config::MinReachMm;
-    if (config::ActivePresetPolicy == config::PresetPolicy::ViaSafePose || !directSafe) {
+        current_.heightMm >= runtime.arm.minimumHeightMm &&
+        current_.reachMm >= runtime.arm.minimumReachMm;
+    if (config::ActivePresetPolicy == config::PresetPolicy::ViaSafePose ||
+        !directSafe) {
         ArmTarget safe = current_;
-        safe.heightMm = config::CargoClearanceHeightMm;
+        safe.heightMm = runtime.arm.cargoClearanceHeightMm;
         waypoints_[waypointCount_++] = safe;
         if (stowing) {
-            safe.reachMm = config::StowReachMm;
+            safe.reachMm = runtime.arm.stowReachMm;
             waypoints_[waypointCount_++] = safe;
         }
     }
     waypoints_[waypointCount_++] = target;
     goal_ = waypoints_[0];
+    goalGripperDegrees_ = goal_.gripperDegrees;
 }
 
-void ArmSubsystem::requestPreset(uint16_t pressedButtons) {
+void ArmSubsystem::requestPreset(
+    uint16_t pressedButtons, const RuntimeConfig &runtime
+) {
     if (!calibrated()) return;
     ArmTarget target = current_;
     bool stowing = false;
-    if (pressedButtons & PresetLeft) target = {0.0F, config::PresetReachMm, config::PresetHeightMm, current_.gripperDegrees};
-    else if (pressedButtons & PresetFront) target = {90.0F, config::PresetReachMm, config::PresetHeightMm, current_.gripperDegrees};
-    else if (pressedButtons & PresetRight) target = {180.0F, config::PresetReachMm, config::PresetHeightMm, current_.gripperDegrees};
-    else if (pressedButtons & PresetStow) {
-        target = {90.0F, config::StowReachMm, config::StowHeightMm, current_.gripperDegrees};
+    if (pressedButtons & PresetLeft) {
+        target = {0.0F, static_cast<float>(runtime.arm.presetReachMm),
+                  static_cast<float>(runtime.arm.presetHeightMm),
+                  current_.gripperDegrees};
+    } else if (pressedButtons & PresetFront) {
+        target = {90.0F, static_cast<float>(runtime.arm.presetReachMm),
+                  static_cast<float>(runtime.arm.presetHeightMm),
+                  current_.gripperDegrees};
+    } else if (pressedButtons & PresetRight) {
+        target = {180.0F, static_cast<float>(runtime.arm.presetReachMm),
+                  static_cast<float>(runtime.arm.presetHeightMm),
+                  current_.gripperDegrees};
+    } else if (pressedButtons & PresetStow) {
+        target = {90.0F, static_cast<float>(runtime.arm.stowReachMm),
+                  static_cast<float>(runtime.arm.stowHeightMm),
+                  current_.gripperDegrees};
         stowing = true;
-    } else return;
-    planTo(target, stowing);
+    } else {
+        return;
+    }
+    holding_ = false;
+    planTo(target, stowing, runtime);
 }
 
-void ArmSubsystem::requestReach(float reachMm) {
+void ArmSubsystem::requestReach(float reachMm, const RuntimeConfig &runtime) {
     if (!calibrated()) return;
+    holding_ = false;
     waypointCount_ = 0;
     goal_ = current_;
-    goal_.reachMm = clampFloat(reachMm, config::MinReachMm, config::MaxReachMm);
+    goal_.reachMm = clampFloat(
+        reachMm, runtime.arm.minimumReachMm, runtime.arm.maximumReachMm
+    );
+    goalGripperDegrees_ = goal_.gripperDegrees;
 }
 
-void ArmSubsystem::update(const OperatorControlFrame &frame, uint32_t nowMs) {
-    if (!calibrated()) return;
-    uint32_t elapsedMs = nowMs - lastUpdateMs_;
-    if (elapsedMs > 100) elapsedMs = 100;
-    const float elapsed = elapsedMs / 1000.0F;
-    lastUpdateMs_ = nowMs;
+void ArmSubsystem::update(
+    const OperatorControlFrame &frame,
+    uint32_t elapsedUs,
+    const RuntimeConfig &runtime
+) {
+    if (!calibrated() || holding_) return;
+    const ArmTarget previous = current_;
+    const float previousGripper = currentGripperDegrees_;
+    if (elapsedUs > config::MaxMotionDtUs) elapsedUs = config::MaxMotionDtUs;
+    const float elapsed = elapsedUs / 1000000.0F;
 
-    if (calibrated() &&
-        (abs(frame.armYaw) > 30 || abs(frame.armReach) > 30 || abs(frame.armHeight) > 30)) {
+    if (abs(frame.armYaw) > 30 || abs(frame.armReach) > 30 ||
+        abs(frame.armHeight) > 30) {
         waypointCount_ = 0;
         goal_ = current_;
         goal_.yawDegrees = clampFloat(
-            goal_.yawDegrees + frame.armYaw / 1000.0F * config::ManualYawDegreesPerSecond * elapsed,
+            goal_.yawDegrees + frame.armYaw / 1000.0F *
+                config::ManualYawDegreesPerSecond * elapsed,
             0.0F, 180.0F
         );
         goal_.reachMm = clampFloat(
-            goal_.reachMm + frame.armReach / 1000.0F * config::ManualLinearMmPerSecond * elapsed,
-            config::MinReachMm, config::MaxReachMm
+            goal_.reachMm + frame.armReach / 1000.0F *
+                config::ManualLinearMmPerSecond * elapsed,
+            runtime.arm.minimumReachMm, runtime.arm.maximumReachMm
         );
         goal_.heightMm = clampFloat(
-            goal_.heightMm + frame.armHeight / 1000.0F * config::ManualLinearMmPerSecond * elapsed,
-            config::MinHeightMm, config::MaxHeightMm
+            goal_.heightMm + frame.armHeight / 1000.0F *
+                config::ManualLinearMmPerSecond * elapsed,
+            runtime.arm.minimumHeightMm, runtime.arm.maximumHeightMm
         );
     }
     if (frame.gripper != 0) {
         const int direction = frame.gripper > 0 ? -1 : 1;
-        gripperCommandDegrees_ = clampFloat(
-            gripperCommandDegrees_ + direction * 60.0F * elapsed,
+        goalGripperDegrees_ = clampFloat(
+            goalGripperDegrees_ + direction * 60.0F * elapsed,
             config::GripperClosedDegrees, config::GripperOpenDegrees
         );
-        goal_.gripperDegrees = static_cast<uint8_t>(gripperCommandDegrees_ + 0.5F);
-        if (goal_.gripperDegrees <= config::GripperClosedDegrees + 3) cargoMayBeHeld_ = true;
-        if (goal_.gripperDegrees >= config::GripperOpenDegrees - 3) cargoMayBeHeld_ = false;
+        goal_.gripperDegrees = clampDegrees(goalGripperDegrees_);
+        if (goal_.gripperDegrees <= config::GripperClosedDegrees + 3)
+            cargoMayBeHeld_ = true;
+        if (goal_.gripperDegrees >= config::GripperOpenDegrees - 3)
+            cargoMayBeHeld_ = false;
     }
 
     if (stepTowardGoal(elapsed) && waypointCount_ > 0) {
         ++waypointIndex_;
-        if (waypointIndex_ < waypointCount_) goal_ = waypoints_[waypointIndex_];
-        else waypointCount_ = 0;
+        if (waypointIndex_ < waypointCount_) {
+            goal_ = waypoints_[waypointIndex_];
+            goalGripperDegrees_ = goal_.gripperDegrees;
+        } else {
+            waypointCount_ = 0;
+        }
     }
-    applyServos();
+    faulted_ = !applyServos(runtime);
+    if (faulted_) {
+        current_ = previous;
+        currentGripperDegrees_ = previousGripper;
+        holdLastCommanded();
+    }
 }
 
 void ArmSubsystem::setCalibrationJoint(uint8_t joint, uint8_t degrees) {
-    if (joint < 4) {
-        servos_[joint].write(degrees > 180 ? 180 : degrees);
-        if (joint == 3) gripperCommandDegrees_ = degrees;
+    if (joint >= 4 || !calibrated()) return;
+    const uint8_t bounded = degrees > 180 ? 180 : degrees;
+    servos_[joint].write(bounded);
+    lastCommandedDegrees_[joint] = bounded;
+    if (joint == 3) {
+        currentGripperDegrees_ = bounded;
+        goalGripperDegrees_ = bounded;
     }
 }
 
+void ArmSubsystem::holdLastCommanded() {
+    waypointCount_ = 0;
+    waypointIndex_ = 0;
+    goal_ = current_;
+    goalGripperDegrees_ = currentGripperDegrees_;
+    holding_ = true;
+}
+
+void ArmSubsystem::releaseHold() { holding_ = false; }
+void ArmSubsystem::clearFault() {
+    faulted_ = false;
+    goal_ = current_;
+    goalGripperDegrees_ = currentGripperDegrees_;
+}
+
 const ArmTarget &ArmSubsystem::currentTarget() const { return current_; }
+const uint8_t *ArmSubsystem::lastCommandedDegrees() const {
+    return lastCommandedDegrees_;
+}
 bool ArmSubsystem::cargoMayBeHeld() const { return cargoMayBeHeld_; }
-bool ArmSubsystem::calibrated() const { return config::ArmCalibrated || ROBOT_ARM_CALIBRATION; }
+bool ArmSubsystem::calibrated() const {
+    return config::ArmCalibrated || ROBOT_ARM_CALIBRATION;
+}
+bool ArmSubsystem::faulted() const { return faulted_; }
 
 } // namespace robot

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Warehouse Robot Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">WAREHOUSE ROBOT / LOCAL CONTROL NODE</p>
+        <h1>Runtime console</h1>
+      </div>
+      <div class="connection-block">
+        <span id="connection-dot" class="dot"></span>
+        <div><strong id="connection-label">Link offline</strong><small id="device-label">Waiting for runtime</small></div>
+      </div>
+    </header>
+
+    <section id="qualification-banner" class="warning-banner">
+      <strong>Drive calibration is not qualified.</strong>
+      Normal closed-loop arming remains locked. Use the raised-wheel qualification profile only.
+    </section>
+
+    <section class="command-strip panel">
+      <div class="state-lockup"><span>Robot state</span><strong id="robot-state">UNKNOWN</strong></div>
+      <div class="state-lockup"><span>Control profile</span><strong id="build-profile">unknown</strong></div>
+      <div class="state-lockup"><span>Response</span><strong id="response-profile">—</strong></div>
+      <div class="actions">
+        <button data-action="arm" class="button arm">Arm</button>
+        <button data-action="disarm" class="button">Disarm</button>
+        <button data-action="clear_fault" class="button">Clear fault</button>
+        <button data-action="clear_estop" class="button">Clear E-stop</button>
+        <button data-action="estop" class="button estop">E-stop</button>
+      </div>
+    </section>
+
+    <main class="dashboard-grid">
+      <section class="panel span-8">
+        <div class="section-heading"><div><p class="eyebrow">DRIVETRAIN</p><h2>Command and feedback</h2></div><span id="drive-mode" class="tag">unknown</span></div>
+        <div class="metric-row">
+          <article><span>Requested chassis</span><strong id="requested-chassis">—</strong><small>long / lateral / yaw</small></article>
+          <article><span>Ramped chassis</span><strong id="ramped-chassis">—</strong><small>mm/s · mm/s · mrad/s</small></article>
+          <article><span>Controlled reversal</span><strong id="zero-crossing-state">—</strong><small>active chassis-axis zero holds</small></article>
+          <article><span>Motor command age</span><strong id="motor-age">—</strong><small>fixed 20 ms scheduler</small></article>
+          <article><span>Encoder feedback</span><strong id="feedback-age">—</strong><small id="feedback-semantics">sample semantics unknown</small></article>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Logical wheel</th><th>Logical target</th><th>Measured</th><th>Error</th><th>Encoder</th><th>Open-loop output</th></tr></thead>
+            <tbody id="wheel-table"></tbody>
+          </table>
+        </div>
+        <p class="inline-note">Motor-board A / B / C / D targets actually transmitted: <strong id="controller-targets">—</strong> mm/s</p>
+        <p id="pwm-note" class="inline-note">Internal controller PWM unavailable in $Car: closed-loop mode.</p>
+        <p id="pwm-board-note" class="inline-note" hidden>$Car_Pwm: A / B / C / D signed percentage ×100: <strong id="pwm-board-values">—</strong></p>
+      </section>
+
+      <section class="panel span-4">
+        <div class="section-heading"><div><p class="eyebrow">SAFETY</p><h2>Fault register</h2></div><span id="host-estop" class="tag danger">HOST E-STOP</span></div>
+        <div id="fault-list" class="badge-list"></div>
+        <p class="eyebrow">ACTIVE WARNINGS</p><div id="warning-list" class="badge-list warning-list"></div>
+        <div class="kv-list">
+          <div><span>Command age</span><strong id="command-age">—</strong></div>
+          <div><span>Controller</span><strong id="controller-state">—</strong></div>
+          <div><span>Pending action</span><strong id="pending-action">none</strong></div>
+          <div><span>UART query</span><strong id="query-state">none</strong></div>
+          <div><span>Encoder sample</span><strong id="feedback-sample">—</strong></div>
+          <div><span>Motor battery</span><strong id="battery-state">—</strong></div>
+        </div>
+      </section>
+
+      <section class="panel span-5">
+        <div class="section-heading"><div><p class="eyebrow">ARM + RANGE</p><h2>Last commanded pose</h2></div><span id="arm-calibrated" class="tag">uncalibrated</span></div>
+        <div id="servo-bars" class="bar-list"></div>
+        <div class="sensor-grid" id="sensor-grid"></div>
+      </section>
+
+      <section class="panel span-7">
+        <div class="section-heading"><div><p class="eyebrow">SCHEDULER</p><h2>Deadline health</h2></div><strong id="max-loop-gap">—</strong></div>
+        <div class="scheduler-grid" id="scheduler-grid"></div>
+        <div class="kv-list compact">
+          <div><span>Query timeouts</span><strong id="query-timeouts">—</strong></div>
+          <div><span>UART overflows</span><strong id="uart-overflows">—</strong></div>
+          <div><span>Coalesced telemetry</span><strong id="dropped-telemetry">—</strong></div>
+          <div><span>Clamped motion dt</span><strong id="dt-clamps">—</strong></div>
+        </div>
+      </section>
+
+      <section class="panel span-12 tuning-panel">
+        <div class="section-heading">
+          <div><p class="eyebrow">SESSION-ONLY CALIBRATION</p><h2>Runtime parameters</h2></div>
+          <div class="heading-actions"><span id="revision-tag" class="tag">revision —</span><button data-action="refresh_parameters" class="button small">Refresh</button></div>
+        </div>
+        <p class="inline-note">Commits are atomic and accepted only while DISARMED. They reset when firmware restarts.</p>
+        <div class="forms-grid">
+          <form id="profile-form" class="tuning-card" data-group="RESPONSE_PROFILE" data-index="0">
+            <h3>Response profile</h3>
+            <label>Profile<select name="profile"><option value="0">Low</option><option value="1">Normal</option><option value="2">Aggressive</option></select></label>
+            <button class="button small commit" type="submit">Commit profile</button>
+          </form>
+          <form id="host-input-form" class="tuning-card wide" data-group="HOST_INPUT" data-index="0">
+            <h3>Host gamepad response</h3><p class="inline-note">Host-only and session-scoped. Deadzones are ‰ of full travel; powers are ×100.</p><div class="field-grid four">
+              <label>Forward deadzone ‰<input name="forward_deadzone" type="number" min="0" max="300"></label><label>Forward power ×100<input name="forward_power" type="number" min="50" max="300"></label>
+              <label>Turn deadzone ‰<input name="turn_deadzone" type="number" min="0" max="300"></label><label>Turn power ×100<input name="turn_power" type="number" min="50" max="300"></label>
+              <label>Arm yaw deadzone ‰<input name="arm_yaw_deadzone" type="number" min="0" max="300"></label><label>Arm yaw power ×100<input name="arm_yaw_power" type="number" min="50" max="300"></label>
+              <label>Arm reach deadzone ‰<input name="arm_reach_deadzone" type="number" min="0" max="300"></label><label>Arm reach power ×100<input name="arm_reach_power" type="number" min="50" max="300"></label>
+            </div><button class="button small commit" type="submit">Commit host response</button>
+          </form>
+          <div id="profile-definitions" class="tuning-card wide"><h3>Profile multipliers</h3><div class="calibration-grid" id="profile-form-grid"></div></div>
+          <form id="speed-form" class="tuning-card" data-group="CHASSIS_SPEED" data-index="0">
+            <h3>Chassis ceilings</h3><div class="field-grid">
+              <label>Forward mm/s<input name="forward" type="number"></label><label>Reverse mm/s<input name="reverse" type="number"></label>
+              <label>Lateral mm/s<input name="lateral" type="number"></label><label>Yaw mrad/s<input name="yaw" type="number"></label>
+              <label>Wheel mm/s<input name="wheel" type="number"></label>
+            </div><button class="button small commit" type="submit">Commit ceilings</button>
+          </form>
+          <form id="accel-form" class="tuning-card wide" data-group="CHASSIS_ACCELERATION" data-index="0">
+            <h3>Acceleration profile</h3><div class="field-grid four">
+              <label>Forward accel<input name="forward_accel" type="number"></label><label>Forward decel<input name="forward_decel" type="number"></label>
+              <label>Reverse accel<input name="reverse_accel" type="number"></label><label>Reverse decel<input name="reverse_decel" type="number"></label>
+              <label>Lateral accel<input name="lateral_accel" type="number"></label><label>Lateral decel<input name="lateral_decel" type="number"></label>
+              <label>Rotation accel<input name="rotation_accel" type="number"></label><label>Rotation decel<input name="rotation_decel" type="number"></label>
+            </div><button class="button small commit" type="submit">Commit accelerations</button>
+          </form>
+          <form id="zero-crossing-form" class="tuning-card" data-group="CHASSIS_ACCELERATION" data-index="1">
+            <h3>Controlled reversal</h3><div class="field-grid">
+              <label>Zero hold ms<input name="zero_hold_ms" type="number" min="0" max="500"></label>
+              <label>Translation threshold mm/s<input name="translation_threshold" type="number" min="0" max="100"></label>
+              <label>Rotation threshold mrad/s<input name="rotation_threshold" type="number" min="0" max="200"></label>
+            </div><button class="button small commit" type="submit">Commit reversal</button>
+          </form>
+          <form id="assist-form" class="tuning-card" data-group="ASSIST" data-index="0">
+            <h3>Motion ceilings</h3><div class="field-grid">
+              <label>Operator limit ‰<input name="normal_limit" type="number" min="0" max="1000"></label>
+              <label>Cargo limit ‰<input name="cargo_limit" type="number" min="0" max="1000"></label>
+              <label>Assist limit ‰<input name="assist_limit" type="number" min="0" max="1000"></label>
+            </div><button class="button small commit" type="submit">Commit ceilings</button>
+          </form>
+          <form id="encoder-geometry-form" class="tuning-card wide" data-group="ENCODER" data-index="0">
+            <h3>Provisional wheel and encoder geometry</h3><div class="field-grid four">
+              <label>Wheel diameter mm<input name="wheel_diameter_mm" type="number" min="1" max="500"></label>
+              <label>Counts / revolution<input name="counts_per_revolution" type="number" min="1" max="60000"></label>
+              <label>Wheel track mm<input name="wheel_track_mm" type="number" min="1" max="1000"></label>
+              <label>Wheelbase mm<input name="wheelbase_mm" type="number" min="1" max="1000"></label>
+              <label>Feedback semantics<select name="semantics"><option value="0">Fixed controller 20 ms (provisional)</option><option value="1">Elapsed between samples</option></select></label>
+            </div><button class="button small commit" type="submit">Commit geometry</button>
+          </form>
+          <div class="tuning-card wide"><h3>Provisional wheel order and signs</h3><p class="inline-note">Each map must use channels 0, 1, 2, and 3 exactly once.</p><div class="calibration-grid" id="encoder-map-form-grid"></div></div>
+          <form id="arm-geometry-form" class="tuning-card wide" data-group="ARM_GEOMETRY" data-index="0">
+            <h3>Provisional arm geometry and workspace</h3><div class="field-grid four">
+              <label>First link mm<input name="first_link_mm" type="number" min="20" max="300"></label><label>Second link mm<input name="second_link_mm" type="number" min="20" max="300"></label>
+              <label>Shoulder height mm<input name="shoulder_height_mm" type="number" min="0" max="500"></label><label>Gripper offset mm<input name="gripper_offset_mm" type="number" min="0" max="200"></label>
+              <label>Minimum reach mm<input name="minimum_reach_mm" type="number" min="0" max="500"></label><label>Maximum reach mm<input name="maximum_reach_mm" type="number" min="0" max="500"></label>
+              <label>Minimum height mm<input name="minimum_height_mm" type="number" min="0" max="500"></label><label>Maximum height mm<input name="maximum_height_mm" type="number" min="0" max="500"></label>
+            </div><button class="button small commit" type="submit">Commit arm geometry</button>
+          </form>
+          <form id="arm-pose-form" class="tuning-card wide" data-group="ARM_GEOMETRY" data-index="1">
+            <h3>Arm clearance and named poses</h3><div class="field-grid four">
+              <label>Cargo clearance mm<input name="clearance_height_mm" type="number" min="0" max="500"></label><label>Preset reach mm<input name="preset_reach_mm" type="number" min="0" max="500"></label>
+              <label>Preset height mm<input name="preset_height_mm" type="number" min="0" max="500"></label><label>Stow reach mm<input name="stow_reach_mm" type="number" min="0" max="500"></label><label>Stow height mm<input name="stow_height_mm" type="number" min="0" max="500"></label>
+            </div><button class="button small commit" type="submit">Commit arm poses</button>
+          </form>
+          <div class="tuning-card wide"><h3>Sonar offsets</h3><div class="calibration-grid sensor-calibration-grid" id="sensor-form-grid"></div></div>
+          <div id="servo-forms" class="tuning-card wide"><h3>Servo limits and centers</h3><div class="calibration-grid" id="servo-form-grid"></div></div>
+          <div id="motor-forms" class="tuning-card wide"><h3>L293D raw PWM calibration</h3><div class="calibration-grid" id="motor-form-grid"></div></div>
+          <div id="uart-pwm-forms" class="tuning-card wide"><h3>UART $Car_Pwm: percentage calibration</h3><div class="calibration-grid" id="uart-pwm-form-grid"></div></div>
+        </div>
+      </section>
+
+      <section class="panel span-12">
+        <div class="section-heading"><div><p class="eyebrow">HOST RUNTIME</p><h2>Recent events</h2></div><span id="host-rate" class="tag">20 Hz target</span></div>
+        <div id="event-log" class="event-log"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

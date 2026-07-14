@@ -1,0 +1,42 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m pip install -e '.[test,package]'
+      - run: python -m unittest discover -s tests -v
+        env:
+          PYTHONPATH: scripts
+      - run: python -m compileall -q scripts tests
+      - run: python -m build
+      - run: python -m PyInstaller warehouse_robot_gui.spec
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install platformio==6.1.18
+      - run: pio test -e native
+      - run: >-
+          pio run
+          -e safe_idle
+          -e l293d_dev
+          -e uart_closed_loop_qualification
+          -e uart_closed_loop_robot
+          -e uart_closed_loop_qualification_9600
+          -e uart_closed_loop_robot_9600
+          -e uart_open_loop_calibration
+          -e arm_calibration

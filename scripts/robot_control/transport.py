@@ -1,13 +1,19 @@
-"""Serial transport helpers."""
+"""Bounded serial transport helpers used by the safety runtime."""
 
 from __future__ import annotations
+
+
+class SerialConnectionError(RuntimeError):
+    """A serial device could not be opened or used."""
 
 
 def require_serial():
     try:
         import serial
     except ImportError as exc:
-        raise SystemExit("Missing pyserial. Install the project with: python3 -m pip install -e .") from exc
+        raise SerialConnectionError(
+            "Missing pyserial. Install the project with: python3 -m pip install -e ."
+        ) from exc
     return serial
 
 
@@ -19,9 +25,17 @@ def list_ports() -> list[str]:
 
 
 def open_port(device: str, baud: int):
+    if not device:
+        raise SerialConnectionError("serial device is required")
+    if baud not in (9600, 38400, 115200):
+        raise SerialConnectionError(f"unsupported baud rate: {baud}")
     serial = require_serial()
     try:
-        return serial.Serial(device, baud, timeout=0.1)
-    except serial.SerialException as exc:
-        raise SystemExit(f"Could not open {device}: {exc}") from exc
-
+        return serial.Serial(
+            device,
+            baud,
+            timeout=0,
+            write_timeout=0.05,
+        )
+    except (serial.SerialException, OSError) as exc:
+        raise SerialConnectionError(f"could not open {device}: {exc}") from exc

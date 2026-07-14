@@ -21,7 +21,8 @@ void CalibrationConsole::execute(ArmSubsystem &arm) {
 }
 
 void CalibrationConsole::poll(Stream &stream, ArmSubsystem &arm) {
-    while (stream.available() > 0) {
+    uint8_t processed = 0;
+    while (stream.available() > 0 && processed++ < 32) {
         const char value = static_cast<char>(stream.read());
         if (value == '\r') continue;
         if (value == '\n') {
@@ -32,4 +33,3 @@ void CalibrationConsole::poll(Stream &stream, ArmSubsystem &arm) {
 }
 
 } // namespace robot
-

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from .config import AxisConfig, RobotControlConfig
 from .protocol import ControlFrame
 
@@ -11,12 +13,11 @@ PRESET_RIGHT = 1 << 2
 PRESET_STOW = 1 << 3
 START_ASSIST = 1 << 4
 CANCEL_ASSIST = 1 << 5
-EMERGENCY_STOP = 1 << 6
-CLEAR_EMERGENCY_STOP = 1 << 7
-
-
 def _axis(joystick, config: AxisConfig) -> int:
-    value = max(-1.0, min(1.0, joystick.get_axis(config.axis)))
+    value = joystick.get_axis(config.axis)
+    if not math.isfinite(value):
+        raise ValueError(f"controller axis {config.axis} is non-finite")
+    value = max(-1.0, min(1.0, value))
     if config.invert:
         value = -value
     if abs(value) < config.deadzone:
@@ -27,7 +28,10 @@ def _axis(joystick, config: AxisConfig) -> int:
 
 
 def _trigger(joystick, axis: int) -> float:
-    return max(0.0, min(1.0, (joystick.get_axis(axis) + 1.0) / 2.0))
+    value = joystick.get_axis(axis)
+    if not math.isfinite(value):
+        raise ValueError(f"controller trigger {axis} is non-finite")
+    return max(0.0, min(1.0, (value + 1.0) / 2.0))
 
 
 def _button(joystick, index: int) -> bool:
@@ -50,8 +54,6 @@ def map_gamepad(joystick, config: RobotControlConfig, sequence: int) -> ControlF
     if hat[1] < 0: buttons |= PRESET_STOW
     if _button(joystick, config.start_assist_button): buttons |= START_ASSIST
     if _button(joystick, config.cancel_assist_button): buttons |= CANCEL_ASSIST
-    if _button(joystick, config.estop_button): buttons |= EMERGENCY_STOP
-    if _button(joystick, config.clear_estop_button): buttons |= CLEAR_EMERGENCY_STOP
     return ControlFrame(
         sequence=sequence,
         forward=_axis(joystick, config.drive_forward),
@@ -63,4 +65,3 @@ def map_gamepad(joystick, config: RobotControlConfig, sequence: int) -> ControlF
         gripper=gripper,
         buttons=buttons,
     )
-

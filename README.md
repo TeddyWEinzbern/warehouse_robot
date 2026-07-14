@@ -1,61 +1,131 @@
 # Warehouse Robot Control System
 
-Arduino Uno firmware and a Python gamepad controller for a four-wheel mecanum
-warehouse robot with a three-axis arm, gripper, and directional ultrasonic
-sensors. The runtime is deliberately cooperative and non-blocking; it does not
-use an RTOS or dynamic allocation.
+Safety-oriented Arduino Uno firmware and a Python host console for a four-wheel
+mecanum warehouse robot. The default build is `safe_idle`; actuator-capable
+profiles must be selected explicitly.
 
-## Architecture
+The UART drivetrain uses the motor board's own closed-loop speed controller:
 
-The firmware processes one immutable control frame through independent state
-machines:
+- `$Car:` carries A/B/C/D target wheel speeds in m/s.
+- `$Car_Pwm:` is a separate open-loop calibration mode.
+- The Arduino does mecanum mixing, chassis-space ramps, safety interlocks,
+  command scheduling, and encoder supervision. It does not contain another
+  wheel-speed PID or PI loop.
+
+The wheel order, signs, dimensions, counts/revolution, `$Car:` scaling, and
+`Encoder_20ms` timing semantics are deliberately marked provisional. The
+normal UART profile refuses to arm while
+`ROBOT_DRIVE_CALIBRATION_QUALIFIED=0`.
+
+## Runtime structure
 
 ```text
-Bluetooth/USB -> Communication -> OperatorControlFrame
-                                      |
-Ultrasonic -> SensorSnapshot -> Assist + Safety -> final DriveIntent
-                                      |              |
-                                ArmSubsystem    ChassisSubsystem
-                                                       |
-                                             selected DriveBackend
+Python gamepad (20 Hz) ─┐
+Local web dashboard ────┼─> host safety runtime ── protocol v2 ──> Arduino mailbox
+                        │                                      │
+                        └─ browser may disconnect safely       ├─ 10 ms chassis ramp
+                                                               ├─ 20 ms $Car: scheduler
+Motor-board UART RX ── fixed parser/query arbiter <────────────┼─ 20 ms encoder query
+                                                               ├─ 20 ms servo trajectory
+Sonar echo edges ───────────────────────────────────────────────┴─ independent telemetry
 ```
 
-- `src/domain`: hardware-independent commands, state, mecanum mixing, and arm
-  inverse kinematics.
-- `src/subsystems`: communication mailbox, chassis, arm planner, sensors,
-  ranging assist, and safety arbitration.
-- `src/drivers`: interchangeable L293D, UART encoder-board, and null backends.
-- `src/app`: build profile, pins, calibration console, and system composition.
-- `scripts/robot_control`: Python input, mapping, protocol, transport, and CLI.
+Every firmware loop pass checks safety and pumps UART bytes. Periodic tasks use
+rollover-safe accumulated deadlines, measured elapsed time, skip-not-catch-up
+behavior, and missed-deadline counters. A scheduler overrun while armed is a
+latched fault. Disarm, link timeout, E-stop, and critical faults bypass all
+ramps and request the exact `$Car:0,0,0,0!` frame immediately.
 
-Communication and sensors never call actuators directly. The safety supervisor
-has final authority over the chassis. A lost command link stops the chassis
-after 300 ms while the arm and gripper hold their last targets.
+More detail is in [protocol-v2.md](docs/protocol-v2.md) and
+[raised-wheel-qualification.md](docs/raised-wheel-qualification.md).
 
 ## Build profiles
 
 ```sh
-pio run -e l293d_dev
-pio run -e uart_encoder_robot
+# Default: no motor backend and no servo attachment
+pio run -e safe_idle
+
+# Raised-wheel UART qualification, capped at 200 mm/s
+pio run -e uart_closed_loop_qualification
+
+# Normal profile; builds but refuses ARM until qualification is promoted
+pio run -e uart_closed_loop_robot
+
+# Dedicated calibration profiles
+pio run -e uart_open_loop_calibration
 pio run -e arm_calibration
-pio test -e native
+
+# Development shield backend
+pio run -e l293d_dev
 ```
 
-`l293d_dev` keeps the open-loop shield and newline diagnostic commands:
+The HC-05 default is 38400 baud. Compatibility builds reduce firmware
+telemetry to 5 Hz and the host control stream to 10 Hz, without changing the
+Arduino's 20 ms motor schedule:
 
-```text
-C:<forward>,<turn>,<strafe>
-W:<front_left>,<front_right>,<rear_left>,<rear_right>
-M:<motor_index>,<speed>
+```sh
+pio run -e uart_closed_loop_qualification_9600
+pio run -e uart_closed_loop_robot_9600
 ```
 
-`uart_encoder_robot` is the final robot profile. The motor board occupies the
-Uno hardware UART at 115200 baud and uses its `$Car:...!`/readback protocol.
-Bluetooth on A5/A4 carries compact, versioned COBS frames at 9600 baud.
+## Python telemetry and tuning console
 
-`arm_calibration` disconnects the drive backend and accepts USB commands such
-as `J:0,90` for base, `J:1,90` for shoulder, `J:2,90` for elbow, and `J:3,60`
-for the gripper.
+Create an environment and install the pinned runtime:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e '.[test]'
+warehouse-robot list-ports
+```
+
+Run the safety runtime and loopback-only dashboard:
+
+```sh
+warehouse-robot run --port /dev/cu.HC-05-DevB --baud 38400
+# Open http://127.0.0.1:8765
+```
+
+An optional standalone console bundle can be produced after installing the
+packaging extra:
+
+```sh
+python3 -m pip install -e '.[package]'
+python3 -m PyInstaller warehouse_robot_gui.spec
+```
+
+Use `--no-gamepad` for telemetry and disarmed calibration only. The browser is
+not in the control or safety path: closing it does not stop the Python runtime,
+the 20 Hz control stream, serial supervision, or E-stop handling. WebSocket
+clients receive coalesced immutable snapshots through one-element queues.
+
+The dashboard shows:
+
+- requested and ramped chassis velocity;
+- `$Car:` A/B/C/D targets, measured speed, target-minus-measured error;
+- encoder validity, age, query state, sample interval, and timing semantics;
+- explicit PWM unavailability in `$Car:` mode, or signed PWM in open-loop modes;
+- arm servo targets, sonar pairs, battery, state, E-stop, faults, and warnings;
+- loop gap, missed deadlines, query timeouts, RX overflows, dt clamps, and
+  coalesced telemetry;
+- session-only servo, PWM, speed, acceleration, reversal, encoder mapping,
+  arm geometry/workspace, sensor-offset, assist/cargo, and response-profile
+  tuning, plus host-only gamepad deadzone and response-power tuning.
+
+Runtime parameter commits are revisioned, atomic, validated against compiled
+hard ceilings, and accepted only in `DISARMED`. They reset on firmware restart.
+Validated values can then be reviewed and copied into source defaults.
+Arm geometry/workspace commits are intentionally available only in the
+`arm_calibration` profile so their parsing and validation code is absent from
+the flash-constrained normal drivetrain image.
+
+The explicit arm calibration command is typed protocol v2, not a production
+ASCII bypass:
+
+```sh
+warehouse-robot calibrate-joint \
+  --port /dev/cu.usbmodemXXXX --joint 0 --angle 90
+```
 
 ## UART robot wiring
 
@@ -63,105 +133,19 @@ for the gripper.
 | --- | --- |
 | Motor-board TX -> Uno RX | D0 |
 | Motor-board RX <- Uno TX | D1 |
-| Bluetooth TX -> Uno RX | A5 |
-| Bluetooth RX <- Uno TX | A4 through a 3.3 V-safe divider |
+| HC-05 TX -> Uno RX | A5 |
+| HC-05 RX <- Uno TX | A4 through a 3.3 V-safe divider |
 | Base / shoulder / elbow / gripper servo | D3 / D5 / D6 / D9 |
-| Shared ultrasonic trigger | D2 |
-| Front pair echoes | D4 / D7 |
-| Left pair echoes | D8 / D10 |
-| Right pair echoes | D11 / D12 |
+| Sonar trigger group 0 / group 1 | D2 / D13 |
+| Group 0 front / left / right echo | D4 / D8 / D11 |
+| Group 1 front / left / right echo | D7 / D10 / D12 |
 
-All modules require a common ground. Power the motors and servos from suitable
-external supplies rather than USB. Disconnect both D0/D1 motor-board jumpers
-while uploading firmware; otherwise the motor board and USB converter share
-the only hardware UART.
+All modules require a common ground. Motors and servos require suitable
+external power. A physical motor-power cutoff remains mandatory for hardware
+qualification. Disconnect the D0/D1 motor-board link during Uno upload.
 
-The L293D profile uses A0-A3 for its four servos, A4/A5 for Bluetooth, one
-shared ultrasonic trigger on D2, and one echo per direction on D9/D10/D13.
-Consequently it supports distance assistance but not paired auto-alignment.
-
-## Arm calibration gate
-
-The committed configuration intentionally has `ArmCalibrated = false` in
-`src/app/BuildConfig.h`. This prevents estimated geometry from enabling arm
-presets or ranging automation.
-
-1. Build and upload `arm_calibration` with the motor board disconnected.
-2. Point each joint slowly through safe positions:
-
-   ```sh
-   PYTHONPATH=scripts python3 scripts/gamepad_motor.py \
-     --port /dev/cu.usbmodemXXXX --calibrate-joint 0 --angle 90
-   ```
-
-3. Measure link lengths, servo zero positions/directions, joint limits,
-   gripper offsets, cargo clearance, and safe preset poses.
-4. Enter those values in `src/app/BuildConfig.h` and only then set
-   `ArmCalibrated = true`.
-5. First validate without cargo at low speed, then repeat with a lightweight
-   test load.
-
-The default preset policy changes only necessary dimensions when the direct
-path satisfies the safety envelope. Unsafe or cargo-carrying stow operations
-first lift to the configured clearance and then retract. The gripper never
-automatically releases during link loss, emergency stop, or stowing.
-
-## Python controller
-
-Install the package:
-
-```sh
-python3 -m pip install -e .
-```
-
-List ports and inspect the Xbox mapping:
-
-```sh
-warehouse-robot --list-ports
-warehouse-robot --monitor
-```
-
-Run the actual Bluetooth robot:
-
-```sh
-warehouse-robot --port /dev/cu.HC-05-DevB --baud 9600
-```
-
-Run the L293D development profile over USB or Bluetooth:
-
-```sh
-warehouse-robot --port /dev/cu.usbmodemXXXX --baud 115200 --legacy-ascii
-warehouse-robot --port /dev/cu.usbmodemXXXX --baud 115200 \
-  --send-command W:400,400,400,400 --duration 1
-```
-
-Saved Xbox mappings live in `scripts/robot_control/config.py`:
-
-- Left stick: forward/back and rotation.
-- LT/RT: left/right strafe.
-- Right stick: arm rotation and extension.
-- LB/RB: arm height down/up.
-- A/B: open/close gripper.
-- D-pad left/up/right: 0/90/180-degree presets; down: stow.
-- Y: start ranging assist; X or a large stick movement: cancel it.
-- Menu: latched emergency stop; View: clear emergency stop.
-
-At 20 Hz, each binary frame atomically carries all axes and buttons, a sequence
-number, protocol version, and CRC-8. The actual robot ignores malformed frames
-and relies on the next frame rather than acknowledging over SoftwareSerial.
-
-## Ultrasonic assistance
-
-Sensor groups follow the arm direction: front near 90 degrees, left near 0,
-and right near 180. One valid sensor provides range only. A pair first uses the
-distance difference for low-speed alignment, then chooses reach using the
-average distance and configured gripper offset.
-
-The assist never approaches an object beyond arm reach. If the robot is too
-close it may move slowly away. Invalid/stale readings, timeout, X, or large
-manual input cancel automatic motion. Small operator corrections are blended
-under the same low-speed limit. Ordinary manual driving does not receive a
-global ultrasonic stop override.
+The D13 second-trigger wiring and HC-05 baud selection remain hardware approval
+gates. Sonar and arm motion are disabled by the qualification profile.
 
 ## Verification
 
@@ -169,10 +153,19 @@ global ultrasonic stop override.
 PYTHONPATH=scripts python3 -m unittest discover -s tests -v
 python3 -m compileall -q scripts tests
 pio test -e native
-pio run -e l293d_dev -e uart_encoder_robot -e arm_calibration
+pio run -e safe_idle -e l293d_dev \
+  -e uart_closed_loop_qualification -e uart_closed_loop_robot \
+  -e uart_open_loop_calibration -e arm_calibration
 ```
 
-Software reduces risk but cannot guarantee collision-free or drop-free motion
-without verified calibration, physical limits, gripper feedback, and adequate
-environment sensing. Keep a physical power cutoff accessible during hardware
-bring-up.
+These checks verify software behavior and Uno resource limits. They do not
+replace the raised-wheel, E-stop, wiring, encoder, or 30-minute jitter tests.
+
+## Legacy/debug isolation
+
+Production communication accepts protocol v2 only. Direct-wheel `W:`, motor
+`M:`, chassis `C:`, and joint `J:` ASCII paths are not referenced by the
+runtime. The old compatibility scripts and `CalibrationConsole` remain in the
+tree only for post-HIL removal review; `CalibrationConsole.cpp` is explicitly
+excluded from every firmware profile and actuator-capable profiles do not call
+it.

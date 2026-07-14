@@ -6,8 +6,12 @@ namespace robot {
 
 class MecanumKinematics {
   public:
-    static WheelTargets mix(int16_t forward, int16_t turn, int16_t strafe);
+    static WheelTargets mix(
+        const ChassisVelocity &velocity,
+        uint16_t wheelTrackMm,
+        uint16_t wheelbaseMm,
+        uint16_t maximumWheelMmS
+    );
 };
 
 } // namespace robot
-

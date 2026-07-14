@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #if (defined(ROBOT_BACKEND_L293D) + defined(ROBOT_BACKEND_UART) +             \
      defined(ROBOT_BACKEND_NONE)) != 1
 #error "Select exactly one robot drive backend"
@@ -8,30 +10,62 @@
 #ifndef ROBOT_ARM_CALIBRATION
 #define ROBOT_ARM_CALIBRATION 0
 #endif
-
-#if defined(ROBOT_BACKEND_UART)
-#define ROBOT_HAS_ENCODER_FEEDBACK 1
-#define ROBOT_HAS_CLOSED_LOOP_SPEED 1
-#else
-#define ROBOT_HAS_ENCODER_FEEDBACK 0
-#define ROBOT_HAS_CLOSED_LOOP_SPEED 0
+#ifndef ROBOT_SAFE_IDLE
+#define ROBOT_SAFE_IDLE 0
+#endif
+#ifndef ROBOT_DRIVE_QUALIFICATION
+#define ROBOT_DRIVE_QUALIFICATION 0
+#endif
+#ifndef ROBOT_DRIVE_CALIBRATION_QUALIFIED
+#define ROBOT_DRIVE_CALIBRATION_QUALIFIED 0
+#endif
+#ifndef ROBOT_ARM_CALIBRATED
+#define ROBOT_ARM_CALIBRATED 0
+#endif
+#ifndef ROBOT_HOST_BAUD
+#define ROBOT_HOST_BAUD 38400UL
 #endif
 
-#if defined(ROBOT_REQUIRE_ENCODERS) && !ROBOT_HAS_ENCODER_FEEDBACK
-#error "This build requires encoder feedback, but the selected backend cannot provide it"
+#if defined(ROBOT_BACKEND_UART)
+#if (defined(ROBOT_UART_CLOSED_LOOP) + defined(ROBOT_UART_OPEN_LOOP)) != 1
+#error "Select exactly one UART motor-controller mode"
+#endif
+#define ROBOT_HAS_ENCODER_FEEDBACK 1
+#else
+#define ROBOT_HAS_ENCODER_FEEDBACK 0
 #endif
 
 namespace robot {
 namespace config {
 
 constexpr unsigned long UsbBaud = 115200UL;
-constexpr unsigned long BluetoothBaud = 9600UL;
+constexpr unsigned long BluetoothBaud = ROBOT_HOST_BAUD;
 constexpr unsigned long MotorBoardBaud = 115200UL;
-constexpr unsigned long CommandTimeoutMs = 300UL;
-constexpr unsigned long SensorStaleMs = 250UL;
-constexpr unsigned long AssistTimeoutMs = 5000UL;
 
-constexpr bool ArmCalibrated = false;
+constexpr uint32_t CommandTimeoutMs = 300UL;
+constexpr uint32_t NeutralQualificationMs = 500UL;
+constexpr uint32_t MotorCommandPeriodUs = 20000UL;
+constexpr uint32_t ZeroRepeatPeriodUs = 50000UL;
+constexpr uint32_t EncoderQueryPeriodUs = 20000UL;
+constexpr uint32_t ChassisRampPeriodUs = 10000UL;
+constexpr uint32_t ServoPeriodUs = 20000UL;
+constexpr uint32_t SonarGroupPeriodUs = 60000UL;
+constexpr uint32_t TelemetryPeriodUs =
+    ROBOT_HOST_BAUD == 9600UL ? 200000UL : 100000UL;
+constexpr uint32_t EncoderTotalPeriodUs = 500000UL;
+constexpr uint32_t BatteryPeriodUs = 1000000UL;
+constexpr uint32_t QueryTimeoutUs = 15000UL;
+constexpr uint32_t FeedbackStaleMs = 100UL;
+constexpr uint32_t SensorStaleMs = 300UL;
+constexpr uint32_t AssistTimeoutMs = 5000UL;
+
+constexpr uint32_t MaxLoopGapUs = 50000UL;
+constexpr uint32_t MaxMotionDtUs = 50000UL;
+constexpr uint32_t MotorLateThresholdUs = 10000UL;
+
+constexpr bool DriveCalibrationQualified = ROBOT_DRIVE_CALIBRATION_QUALIFIED != 0;
+constexpr bool ArmCalibrated = ROBOT_ARM_CALIBRATED != 0;
+
 constexpr float FirstLinkMm = 110.0F;
 constexpr float SecondLinkMm = 110.0F;
 constexpr float ShoulderBaseHeightMm = 55.0F;
@@ -55,15 +89,25 @@ constexpr uint8_t ElbowZeroDegrees = 10;
 constexpr uint8_t GripperOpenDegrees = 80;
 constexpr uint8_t GripperClosedDegrees = 25;
 
-constexpr uint16_t NormalDriveLimit = 1000;
-constexpr uint16_t CargoDriveLimit = 450;
-constexpr uint16_t AssistDriveLimit = 180;
+constexpr uint16_t NormalDriveLimitPermille = 1000;
+constexpr uint16_t CargoDriveLimitPermille = 450;
+constexpr uint16_t AssistDriveLimitPermille = 180;
 constexpr uint16_t AssistCancelStickThreshold = 650;
 constexpr uint16_t AssistManualBlendThreshold = 250;
 constexpr uint16_t MinAssistDistanceMm = 120;
 constexpr uint16_t AlignmentToleranceMm = 15;
 
-enum class PresetPolicy { MinimumChange, ViaSafePose };
+constexpr uint16_t QualificationWheelLimitMmS = 200;
+constexpr uint16_t HardWheelLimitMmS = 1000;
+constexpr int16_t HardMaxTranslationMmS = 1000;
+constexpr int16_t HardMaxYawMradS = 3000;
+constexpr uint16_t HardMaxTranslationAccelerationMmS2 = 3000;
+constexpr uint16_t HardMaxRotationalAccelerationMradS2 = 8000;
+constexpr uint16_t HardMaxWheelDiameterMm = 300;
+constexpr uint16_t HardMaxCountsPerRevolution = 60000;
+constexpr uint16_t HardMaxWheelGeometryMm = 1000;
+
+enum class PresetPolicy : uint8_t { MinimumChange, ViaSafePose };
 constexpr PresetPolicy ActivePresetPolicy = PresetPolicy::MinimumChange;
 
 } // namespace config

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Servo.h>
 
+#include "domain/RuntimeConfig.h"
 #include "domain/RobotTypes.h"
 
 namespace robot {
@@ -10,14 +11,23 @@ namespace robot {
 class ArmSubsystem {
   public:
     ArmSubsystem();
-    void begin();
-    void update(const OperatorControlFrame &frame, uint32_t nowMs);
-    void requestPreset(uint16_t pressedButtons);
-    void requestReach(float reachMm);
+    void begin(const RuntimeConfig &runtime);
+    void update(
+        const OperatorControlFrame &frame,
+        uint32_t elapsedUs,
+        const RuntimeConfig &runtime
+    );
+    void requestPreset(uint16_t pressedButtons, const RuntimeConfig &runtime);
+    void requestReach(float reachMm, const RuntimeConfig &runtime);
     void setCalibrationJoint(uint8_t joint, uint8_t degrees);
+    void holdLastCommanded();
+    void releaseHold();
+    void clearFault();
     const ArmTarget &currentTarget() const;
+    const uint8_t *lastCommandedDegrees() const;
     bool cargoMayBeHeld() const;
     bool calibrated() const;
+    bool faulted() const;
 
   private:
     Servo servos_[4];
@@ -27,11 +37,19 @@ class ArmSubsystem {
     uint8_t waypointCount_;
     uint8_t waypointIndex_;
     bool cargoMayBeHeld_;
-    float gripperCommandDegrees_;
-    uint32_t lastUpdateMs_;
-    void planTo(const ArmTarget &target, bool stowing);
-    void applyServos();
+    bool holding_;
+    bool faulted_;
+    float currentGripperDegrees_;
+    float goalGripperDegrees_;
+    uint8_t lastCommandedDegrees_[4];
+    void planTo(const ArmTarget &target, bool stowing, const RuntimeConfig &runtime);
+    bool applyServos(const RuntimeConfig &runtime);
     bool stepTowardGoal(float elapsedSeconds);
+    uint8_t mapJoint(
+        uint8_t joint,
+        float offsetFromCenter,
+        const RuntimeConfig &runtime
+    ) const;
     static float clampFloat(float value, float low, float high);
 };
 
