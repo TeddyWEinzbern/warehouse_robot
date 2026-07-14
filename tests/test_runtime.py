@@ -202,8 +202,74 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(links), 2)
         self.assertTrue(all(link.closed for link in links))
         self.assertIn("HELLO_TELEMETRY", snapshot["fatal_error"])
+        self.assertFalse(snapshot["one_way"])
+        self.assertFalse(snapshot["link_verified"])
         self.assertEqual(snapshot["connection"]["consecutive_failures"], 2)
         self.assertGreaterEqual(opened_at[1] - opened_at[0], 0.035)
+
+    def test_one_way_without_replies_keeps_link_open_and_streams_safe_control(self):
+        link = FakeSerial(answer_hello=False)
+        runtime = RobotRuntime(
+            "fake",
+            9600,
+            use_gamepad=False,
+            serial_factory=lambda *_: link,
+            maximum_reconnect_attempts=1,
+            startup_stabilization_seconds=0.0,
+            handshake_timeout_seconds=0.02,
+            one_way=True,
+        )
+        runtime.start()
+        time.sleep(0.16)
+
+        snapshot = runtime.snapshot()
+        self.assertTrue(snapshot["connected"])
+        self.assertTrue(snapshot["one_way"])
+        self.assertFalse(snapshot["link_verified"])
+        self.assertEqual(snapshot["link_verification"], "unverified_one_way")
+        self.assertEqual(snapshot["link_state"], "one_way_unverified")
+        self.assertEqual(snapshot["fatal_error"], "")
+        self.assertEqual(snapshot["connection"]["consecutive_failures"], 0)
+        self.assertFalse(link.closed)
+        self.assertTrue(
+            any(
+                event["level"] == "warning" and "ONE-WAY MODE" in event["message"]
+                for event in snapshot["events"]
+            )
+        )
+
+        messages = [decode_message(packet).message_type for packet in link.writes]
+        self.assertEqual(messages[0], MessageType.DISARM)
+        self.assertNotIn(MessageType.HELLO, messages)
+        self.assertNotIn(MessageType.PARAMETER_SNAPSHOT_REQUEST, messages)
+        controls = [
+            decode_control_frame(packet)
+            for packet in link.writes
+            if decode_message(packet).message_type == MessageType.CONTROL
+        ]
+        self.assertGreaterEqual(len(controls), 2)
+        self.assertTrue(
+            all(
+                frame.forward == frame.turn == frame.strafe == 0
+                and frame.arm_yaw == frame.arm_reach == frame.arm_height == 0
+                and frame.gripper == 0
+                and frame.buttons == 0
+                and frame.control_flags & ControlFlag.ESTOP_ASSERTED
+                for frame in controls
+            )
+        )
+        runtime.stop()
+        self.assertTrue(link.closed)
+
+    def test_one_way_rejects_telemetry_dependent_operations(self):
+        runtime = RobotRuntime(
+            "fake", one_way=True, serial_factory=lambda *_: FakeSerial()
+        )
+        runtime._connected = True
+        for action in ("refresh_parameters", "set_host_input", "set_parameter"):
+            self.assertFalse(runtime.submit(action))
+        self.assertTrue(runtime._commands.empty())
+        self.assertIn("unavailable", runtime._events[-1]["message"])
 
     def test_9600_bootstrap_keeps_tx_window_open_until_delayed_hello(self):
         link = FakeSerial(

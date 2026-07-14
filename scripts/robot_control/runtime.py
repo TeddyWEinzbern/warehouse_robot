@@ -40,6 +40,14 @@ PROFILE_NAMES = [
     "uart_closed_loop_robot", "uart_open_loop_calibration", "arm_calibration",
 ]
 
+ONE_WAY_UNAVAILABLE_ACTIONS = frozenset(
+    {"refresh_parameters", "set_host_input", "set_parameter"}
+)
+ONE_WAY_WARNING = (
+    "ONE-WAY MODE: the firmware link is unverified; telemetry and runtime "
+    "parameter operations are unavailable"
+)
+
 
 @dataclass(order=True)
 class RuntimeCommand:
@@ -65,6 +73,7 @@ class RobotRuntime:
         handshake_timeout_seconds: float = 2.0,
         reconnect_initial_delay_seconds: float = 0.5,
         reconnect_reset_seconds: float = 1.0,
+        one_way: bool = False,
     ) -> None:
         self.device = device
         self.baud = baud
@@ -76,6 +85,7 @@ class RobotRuntime:
         self.handshake_timeout_seconds = max(0.01, handshake_timeout_seconds)
         self.reconnect_initial_delay_seconds = max(0.001, reconnect_initial_delay_seconds)
         self.reconnect_reset_seconds = max(0.0, reconnect_reset_seconds)
+        self.one_way = bool(one_way)
         self.control_rate_hz = 10.0 if baud == 9600 else CONTROL.rate_hz
         self._control_config = CONTROL
         self._host_parameter_revision = 0
@@ -92,6 +102,7 @@ class RobotRuntime:
         self._decoder = ProtocolDecoder()
         self._sequence = 0
         self._connected = False
+        self._link_verified = False
         self._link_state = "disconnected"
         self._retry_at = 0.0
         self._stabilize_until: float | None = None
@@ -158,6 +169,12 @@ class RobotRuntime:
         if action == "estop":
             self._critical_estop.set()
             return True
+        if self.one_way and action in ONE_WAY_UNAVAILABLE_ACTIONS:
+            self._record_event(
+                "warning", f"{action} is unavailable while --one-way is active"
+            )
+            self._publish_snapshot()
+            return False
         priority = 1 if action == "disarm" else 5
         command = RuntimeCommand(priority, next(self._command_order), action, payload or {})
         with self._command_state_lock:
@@ -196,6 +213,13 @@ class RobotRuntime:
         snapshot = {
             "connected": self._connected,
             "link_state": self._link_state,
+            "one_way": self.one_way,
+            "link_verified": self._link_verified,
+            "link_verification": (
+                "unverified_one_way"
+                if self.one_way
+                else ("verified" if self._link_verified else "pending")
+            ),
             "device": self.device,
             "baud": self.baud,
             "control_rate_hz": self.control_rate_hz,
@@ -290,6 +314,7 @@ class RobotRuntime:
         with self._command_state_lock:
             self._connected = False
             self._clear_commands_unlocked()
+        self._link_verified = False
         self._link_state = "stabilizing"
         self._stabilize_until = now + self.startup_stabilization_seconds
         self._handshake_deadline = None
@@ -303,6 +328,33 @@ class RobotRuntime:
         self._control_config = CONTROL
         self._host_parameter_revision = 0
         self._last_control_sent_at = None
+
+    def _start_one_way(self, now: float) -> None:
+        """Enter explicit degraded operation without requiring firmware replies."""
+        if self._serial is None:
+            return
+        self._link_state = "one_way_starting"
+        self._stabilize_until = None
+        self._handshake_deadline = None
+        self._bootstrap_control_at = None
+        if not self._send_simple(MessageType.DISARM):
+            return
+        safe_control = ControlFrame(
+            sequence=self._next_sequence(),
+            control_flags=int(ControlFlag.ESTOP_ASSERTED),
+        )
+        if not self._write(encode_control_frame(safe_control)):
+            return
+        self._host_stats["bootstrap_frames_sent"] += 1
+        with self._command_state_lock:
+            self._clear_commands_unlocked()
+            self._connected = True
+        self._link_verified = False
+        self._link_state = "one_way_unverified"
+        self._connected_at = now
+        self._last_error = ""
+        self._host_stats["reconnects"] += 1
+        self._record_event("warning", ONE_WAY_WARNING)
 
     def _start_handshake(self, now: float) -> None:
         if self._serial is None:
@@ -340,6 +392,7 @@ class RobotRuntime:
         with self._command_state_lock:
             self._connected = False
             self._clear_commands_unlocked()
+        self._link_verified = False
         self._stabilize_until = None
         self._handshake_deadline = None
         self._bootstrap_control_at = None
@@ -426,6 +479,7 @@ class RobotRuntime:
                 with self._command_state_lock:
                     self._clear_commands_unlocked()
                     self._connected = True
+                self._link_verified = True
                 self._link_state = "connected"
                 self._handshake_deadline = None
                 self._bootstrap_control_at = None
@@ -523,6 +577,11 @@ class RobotRuntime:
 
     def _process_command(self, command: RuntimeCommand) -> None:
         action = command.action
+        if self.one_way and action in ONE_WAY_UNAVAILABLE_ACTIONS:
+            self._record_event(
+                "warning", f"{action} is unavailable while --one-way is active"
+            )
+            return
         if action == "disarm":
             self._pending_neutral_action = None
             self._send_simple(MessageType.DISARM)
@@ -652,6 +711,7 @@ class RobotRuntime:
         self._retry_at = control_deadline
         while not self._stop.is_set():
             now = self.clock()
+            was_connected = self._connected
             if self._serial is None and self._link_state != "fatal" and now >= self._retry_at:
                 try:
                     self._open_connection(now)
@@ -668,7 +728,10 @@ class RobotRuntime:
                 and self._stabilize_until is not None
                 and now >= self._stabilize_until
             ):
-                self._start_handshake(now)
+                if self.one_way:
+                    self._start_one_way(now)
+                else:
+                    self._start_handshake(now)
 
             if (
                 self._link_state == "handshaking"
@@ -677,7 +740,6 @@ class RobotRuntime:
             ):
                 self._send_bootstrap_control(now)
 
-            was_connected = self._connected
             self._read_messages(now)
             if not was_connected and self._connected:
                 control_deadline = now

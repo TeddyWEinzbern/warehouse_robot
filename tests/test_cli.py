@@ -10,13 +10,16 @@ from robot_control import cli
 from robot_control.transport import SerialConnectionError
 
 
-def run_args(port: str, web_port: int = 8765) -> argparse.Namespace:
+def run_args(
+    port: str, web_port: int = 8765, *, one_way: bool = False
+) -> argparse.Namespace:
     return argparse.Namespace(
         command="run",
         port=port,
         baud=38400,
         web_port=web_port,
         no_gamepad=True,
+        one_way=one_way,
         reconnect_attempts=2,
     )
 
@@ -72,6 +75,42 @@ class SerialDeviceValidationTests(unittest.TestCase):
 
 
 class DashboardStartupTests(unittest.TestCase):
+    def test_parser_accepts_explicit_one_way_flag(self):
+        with patch(
+            "sys.argv",
+            [
+                "warehouse-robot",
+                "run",
+                "--port",
+                "/dev/cu.test",
+                "--one-way",
+            ],
+        ):
+            args = cli.parse_args()
+        self.assertTrue(args.one_way)
+
+    def test_one_way_flag_is_passed_to_runtime_and_warns_on_stderr(self):
+        stderr = io.StringIO()
+        with (
+            patch("robot_control.cli.validate_serial_device"),
+            patch("robot_control.cli.RobotRuntime") as runtime_class,
+            patch("robot_control.web.reserve_dashboard_socket"),
+            patch("robot_control.web.create_app", return_value=object()),
+            patch("aiohttp.web.run_app"),
+            redirect_stderr(stderr),
+        ):
+            cli.run(run_args("/dev/cu.test", one_way=True))
+
+        runtime_class.assert_called_once_with(
+            "/dev/cu.test",
+            38400,
+            use_gamepad=False,
+            maximum_reconnect_attempts=2,
+            one_way=True,
+        )
+        self.assertIn("WARNING: --one-way", stderr.getvalue())
+        self.assertIn("unverified", stderr.getvalue())
+
     def test_occupied_web_port_never_constructs_or_starts_runtime(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
             occupied.bind(("127.0.0.1", 0))
