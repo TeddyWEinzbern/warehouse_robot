@@ -62,8 +62,6 @@ RobotProfile RobotApplication::profile() const {
     return RobotProfile::SafeIdle;
 #elif ROBOT_ARM_CALIBRATION
     return RobotProfile::ArmCalibration;
-#elif defined(ROBOT_BACKEND_L293D)
-    return RobotProfile::L293DDevelopment;
 #elif defined(ROBOT_UART_OPEN_LOOP)
     return RobotProfile::UartOpenLoopCalibration;
 #elif ROBOT_DRIVE_QUALIFICATION
@@ -165,21 +163,32 @@ void RobotApplication::processHostMessages(
     PendingCalibration calibration = {};
     if (communication_.transmitIdle() && communication_.takeCalibration(calibration)) {
 #if ROBOT_ARM_CALIBRATION
-        if (safety_.state() == RobotState::Disarmed && calibration.joint < 4 &&
-            calibration.degrees <= 180) {
-            arm_.setCalibrationJoint(calibration.joint, calibration.degrees);
-            communication_.sendAck(
-                hostStream(), calibration.sequence,
-                MessageType::CalibrationCommand, runtime_.revision
-            );
-        } else
-#endif
-        {
+        if (safety_.state() != RobotState::Disarmed || calibration.joint >= 4 ||
+            calibration.degrees > 180) {
             communication_.sendNack(
                 hostStream(), calibration.sequence,
                 MessageType::CalibrationCommand, NackReason::InvalidState
             );
+        } else if (!arm_.setCalibrationJoint(
+                       calibration.joint, calibration.degrees, runtime_
+                   )) {
+            // Rejected by the joint-coupling guard (four-bar fold band).
+            communication_.sendNack(
+                hostStream(), calibration.sequence,
+                MessageType::CalibrationCommand, NackReason::ValidationFailed
+            );
+        } else {
+            communication_.sendAck(
+                hostStream(), calibration.sequence,
+                MessageType::CalibrationCommand, runtime_.revision
+            );
         }
+#else
+        communication_.sendNack(
+            hostStream(), calibration.sequence,
+            MessageType::CalibrationCommand, NackReason::InvalidState
+        );
+#endif
     }
 }
 
@@ -200,6 +209,10 @@ void RobotApplication::updateMotionIntent(uint32_t nowMs) {
         return;
     }
 
+#if !ROBOT_ARM_CALIBRATION
+    // The calibration profile can never arm, so the planner below is
+    // unreachable there; compiling it out lets the linker drop the whole
+    // task-space pipeline from that image.
     arm_.requestPreset(activeFrame_.pressed, runtime_);
     assistOutput_ = assist_.update(
         activeFrame_, sensors_.snapshot(), arm_.currentTarget(),
@@ -211,6 +224,7 @@ void RobotApplication::updateMotionIntent(uint32_t nowMs) {
         activeFrame_, assistOutput_, arm_.cargoMayBeHeld(), runtime_
     );
     chassis_.setDesired(intent, runtime_);
+#endif
 }
 
 void RobotApplication::evaluateMissWindow(uint32_t nowUs) {
@@ -262,8 +276,12 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
             elapsedUs = config::MaxMotionDtUs;
             saturatingIncrement(motionDtClamps_);
         }
+#if ROBOT_ARM_CALIBRATION
+        arm_.calibrationTick(elapsedUs, runtime_);
+#else
         if (safety_.armed() && armMotionEnabled())
             arm_.update(activeFrame_, elapsedUs, runtime_);
+#endif
         if (safety_.armed() && servoTask_.stats().consecutiveMisses >= 3)
             safety_.latchFault(FaultSchedulerOverrun);
         if (arm_.faulted()) safety_.latchFault(FaultArmTarget);
@@ -385,7 +403,9 @@ void RobotApplication::sendStatus(uint32_t nowMs) {
     status_.state = safety_.state();
     status_.assistStage = assistOutput_.stage;
     status_.faults = static_cast<uint16_t>(safety_.faults() | drive.faults);
-    status_.warnings = drive.warnings;
+    status_.warnings = static_cast<uint16_t>(
+        drive.warnings | (arm_.targetLimited() ? WarningArmTargetLimited : 0U)
+    );
     status_.commandAgeMs = saturatingAge(nowMs, activeFrame_.receivedAtMs);
     status_.cargoMayBeHeld = arm_.cargoMayBeHeld();
     status_.linkAlive = safety_.linkAlive();
@@ -562,16 +582,11 @@ bool RobotApplication::sendNextParameterSnapshot() {
         data[2] = static_cast<uint8_t>(value.centerOffsetDegrees);
         data[3] = static_cast<uint8_t>(value.direction); length = 4;
     } else if (snapshotCursor_ < 8) {
-        group = ParameterGroup::OpenLoopMotor; index = snapshotCursor_ - 4;
-        const MotorCalibration &value = runtime_.motors[index];
-        data[0] = value.minimumPwm; data[1] = value.maximumPwm;
-        data[2] = static_cast<uint8_t>(value.direction); length = 3;
-    } else if (snapshotCursor_ < 12) {
-        group = ParameterGroup::UartOpenLoop; index = snapshotCursor_ - 8;
+        group = ParameterGroup::UartOpenLoop; index = snapshotCursor_ - 4;
         const MotorCalibration &value = runtime_.uartOpenLoop[index];
         data[0] = value.minimumPwm; data[1] = value.maximumPwm;
         data[2] = static_cast<uint8_t>(value.direction); length = 3;
-    } else if (snapshotCursor_ == 12) {
+    } else if (snapshotCursor_ == 8) {
         group = ParameterGroup::ChassisSpeed;
         int16_t values[5] = {
             runtime_.chassis.maximumForwardMmS,
@@ -584,7 +599,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 13) {
+    } else if (snapshotCursor_ == 9) {
         group = ParameterGroup::ChassisAcceleration; index = 0;
         const uint16_t values[8] = {
             runtime_.chassis.acceleration.forwardAccelMmS2,
@@ -600,7 +615,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 14) {
+    } else if (snapshotCursor_ == 10) {
         group = ParameterGroup::ChassisAcceleration; index = 1;
         const uint16_t values[3] = {
             runtime_.chassis.acceleration.zeroCrossingHoldMs,
@@ -611,7 +626,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 15) {
+    } else if (snapshotCursor_ == 11) {
         group = ParameterGroup::Encoder; index = 0;
         const uint16_t values[4] = {
             runtime_.encoder.wheelDiameterMm, runtime_.encoder.countsPerRevolution,
@@ -622,21 +637,21 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
         data[length++] = static_cast<uint8_t>(runtime_.encoder.semantics);
-    } else if (snapshotCursor_ == 16 || snapshotCursor_ == 17) {
+    } else if (snapshotCursor_ == 12 || snapshotCursor_ == 13) {
         group = ParameterGroup::Encoder;
-        index = snapshotCursor_ == 16 ? 1 : 2;
+        index = snapshotCursor_ == 12 ? 1 : 2;
         const int8_t *map = index == 1
             ? runtime_.encoder.channelMap : runtime_.encoder.commandMap;
         const int8_t *signs = index == 1
             ? runtime_.encoder.signs : runtime_.encoder.commandSigns;
         for (uint8_t i = 0; i < 4; ++i) data[length++] = static_cast<uint8_t>(map[i]);
         for (uint8_t i = 0; i < 4; ++i) data[length++] = static_cast<uint8_t>(signs[i]);
-    } else if (snapshotCursor_ < 24) {
-        group = ParameterGroup::Sensor; index = snapshotCursor_ - 18;
+    } else if (snapshotCursor_ < 20) {
+        group = ParameterGroup::Sensor; index = snapshotCursor_ - 14;
         const int16_t value = runtime_.sensorOffsetMm[index];
         data[0] = static_cast<uint8_t>(value);
         data[1] = static_cast<uint8_t>(value >> 8); length = 2;
-    } else if (snapshotCursor_ == 24) {
+    } else if (snapshotCursor_ == 20) {
         group = ParameterGroup::Assist;
         const uint16_t values[3] = {
             runtime_.normalDriveLimitPermille,
@@ -647,15 +662,15 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 25) {
+    } else if (snapshotCursor_ == 21) {
         group = ParameterGroup::ResponseProfile;
         data[0] = static_cast<uint8_t>(runtime_.chassis.activeProfile);
         length = 1;
-    } else if (snapshotCursor_ < 29) {
+    } else if (snapshotCursor_ < 25) {
         group = ParameterGroup::ResponseProfile;
-        index = snapshotCursor_ - 25;
+        index = snapshotCursor_ - 21;
         const ResponseProfileDefinition &definition =
-            runtime_.responseProfiles[snapshotCursor_ - 26];
+            runtime_.responseProfiles[snapshotCursor_ - 22];
         const uint16_t values[3] = {
             definition.speedPermille, definition.accelerationPermille,
             definition.decelerationPermille
@@ -667,7 +682,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
 #if ROBOT_ARM_CALIBRATION
     } else {
         group = ParameterGroup::ArmGeometry;
-        index = snapshotCursor_ - 29;
+        index = snapshotCursor_ - 25;
         if (index == 0) {
             const uint16_t values[8] = {
                 runtime_.arm.firstLinkMm, runtime_.arm.secondLinkMm,
@@ -703,9 +718,9 @@ bool RobotApplication::sendNextParameterSnapshot() {
     );
     if (++snapshotCursor_ >=
 #if ROBOT_ARM_CALIBRATION
-            31
+            27
 #else
-            29
+            25
 #endif
        ) snapshotActive_ = false;
     return true;

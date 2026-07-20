@@ -54,9 +54,6 @@ pio run -e uart_closed_loop_robot
 # Dedicated calibration profiles
 pio run -e uart_open_loop_calibration
 pio run -e arm_calibration
-
-# Development shield backend (current default_envs selection)
-pio run -e l293d_dev
 ```
 
 The standard firmware profiles use 38400 baud, but the HC-05 data-mode baud must
@@ -65,7 +62,6 @@ firmware telemetry to 5 Hz and require the host's 9600-baud mode, which reduces
 its control stream to 10 Hz. The Arduino's 20 ms motor schedule is unchanged:
 
 ```sh
-pio run -e l293d_dev_9600
 pio run -e uart_closed_loop_qualification_9600
 pio run -e uart_closed_loop_robot_9600
 ```
@@ -85,7 +81,7 @@ Run the safety runtime and loopback-only dashboard:
 
 ```sh
 # Use the exact /dev/cu.HC-05... path reported by `warehouse-robot list-ports`.
-# This example requires l293d_dev_9600 or another matching 9600-baud profile.
+# This example requires a matching 9600-baud firmware profile.
 warehouse-robot run --port /dev/cu.HC-05 --baud 9600
 # Open http://127.0.0.1:8765
 ```
@@ -158,7 +154,7 @@ gates. Sonar and arm motion are disabled by the qualification profile.
 PYTHONPATH=scripts python3 -m unittest discover -s tests -v
 python3 -m compileall -q scripts tests
 pio test -e native
-pio run -e safe_idle -e l293d_dev -e l293d_dev_9600 \
+pio run -e safe_idle \
   -e uart_closed_loop_qualification -e uart_closed_loop_robot \
   -e uart_closed_loop_qualification_9600 -e uart_closed_loop_robot_9600 \
   -e uart_open_loop_calibration -e arm_calibration

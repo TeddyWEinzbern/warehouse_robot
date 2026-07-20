@@ -54,8 +54,9 @@ firmware parser uses the same version, CRC, COBS, and exact 16-byte payload.
   reply, regardless of conversion semantics.
 - `raw_increments` and encoder totals have independent validity and age.
 - `$Car:` mode sets PWM validity false. A speed target is never relabeled PWM.
-- L293D reports signed raw 8-bit PWM. `$Car_Pwm:` reports signed percent times
-  100. These are carried in the separate open-loop PWM message.
+- `$Car_Pwm:` reports signed percent times 100, carried in the separate
+  open-loop PWM message. (The retired L293D backend used signed raw 8-bit PWM;
+  its `pwm_unit` and profile enum slots remain reserved.)
 
 ## Runtime parameter groups
 
@@ -64,7 +65,7 @@ match, the robot must be `DISARMED`, and the complete candidate configuration
 must pass validation.
 
 1. Servo lower/upper limits, center offsets, and directions.
-2. Per-motor open-loop PWM minimum/maximum and directions.
+2. Reserved (was per-motor open-loop PWM for the retired L293D backend).
 3. Chassis speed and final wheel ceilings.
 4. Direction-specific acceleration/deceleration and zero-crossing settings.
 5. Encoder geometry, feedback channel/sign map, command channel/sign map, and

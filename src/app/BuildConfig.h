@@ -2,8 +2,7 @@
 
 #include <stdint.h>
 
-#if (defined(ROBOT_BACKEND_L293D) + defined(ROBOT_BACKEND_UART) +             \
-     defined(ROBOT_BACKEND_NONE)) != 1
+#if (defined(ROBOT_BACKEND_UART) + defined(ROBOT_BACKEND_NONE)) != 1
 #error "Select exactly one robot drive backend"
 #endif
 
@@ -66,8 +65,8 @@ constexpr uint32_t MotorLateThresholdUs = 10000UL;
 constexpr bool DriveCalibrationQualified = ROBOT_DRIVE_CALIBRATION_QUALIFIED != 0;
 constexpr bool ArmCalibrated = ROBOT_ARM_CALIBRATED != 0;
 
-constexpr float FirstLinkMm = 110.0F;
-constexpr float SecondLinkMm = 110.0F;
+constexpr float FirstLinkMm = 120.0F;
+constexpr float SecondLinkMm = 120.0F;
 constexpr float ShoulderBaseHeightMm = 55.0F;
 constexpr float GripperLengthOffsetMm = 35.0F;
 constexpr float GripperHeightOffsetMm = 15.0F;
@@ -80,12 +79,30 @@ constexpr float PresetReachMm = 135.0F;
 constexpr float PresetHeightMm = 105.0F;
 constexpr float StowReachMm = 65.0F;
 constexpr float StowHeightMm = 135.0F;
-constexpr float ManualYawDegreesPerSecond = 70.0F;
-constexpr float ManualLinearMmPerSecond = 80.0F;
 
+// Elbow drive four-bar: 40 mm horn and crank, 120 mm rod parallel to the
+// 120 mm upper arm, crank fixed 20 degrees ahead of the forearm, links 10 mm
+// wide. Rod-to-upper-arm clearance is 40*sin(fold + 20 deg), so fold 135 deg
+// keeps >= 17 mm between link centrelines (bare contact is at 145.5 deg).
+constexpr float ElbowFoldMinDegrees = 5.0F;
+constexpr float ElbowFoldMaxDegrees = 135.0F;
+// Extra fold allowance during calibration jog and for post-projection
+// rounding; clearance at 138 deg is still >= 16 mm.
+constexpr float ElbowFoldSlackDegrees = 3.0F;
+constexpr float ServoClampToleranceDegrees = 1.5F;
+
+constexpr float ArmYawDegreesPerSecond = 70.0F;
+constexpr float ArmLinearMmPerSecond = 80.0F;
+constexpr float GripperDegreesPerSecond = 60.0F;
+constexpr float CalibrationDegreesPerSecond = 60.0F;
+
+// Servo raw angles at the calibration anchor pose: upper arm vertical, horn
+// at 20 degrees so the forearm is level, gripper open. Joint semantics:
+// base offset = yaw - 90, shoulder offset = upper-arm angle from vertical,
+// elbow offset = forearm angle from horizontal (absolute, four-bar drive).
 constexpr uint8_t BaseZeroDegrees = 90;
 constexpr uint8_t ShoulderZeroDegrees = 90;
-constexpr uint8_t ElbowZeroDegrees = 10;
+constexpr uint8_t ElbowZeroDegrees = 90;
 constexpr uint8_t GripperOpenDegrees = 80;
 constexpr uint8_t GripperClosedDegrees = 25;
 

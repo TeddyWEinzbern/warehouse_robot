@@ -19,9 +19,6 @@ RuntimeConfig RuntimeConfig::defaults() {
     };
     for (uint8_t index = 0; index < 4; ++index) {
         result.servos[index] = {0, 180, static_cast<int8_t>(centers[index] - 90), 1};
-        result.motors[index] = {
-            static_cast<uint8_t>(index < 2 ? 30 : 35), 70, 1
-        };
         result.uartOpenLoop[index] = {0, 100, 1};
         result.encoder.channelMap[index] = static_cast<int8_t>(index);
         result.encoder.commandMap[index] = static_cast<int8_t>(index);
@@ -45,7 +42,19 @@ RuntimeConfig RuntimeConfig::defaults() {
     result.chassis.translationZeroThresholdMmS = 10;
     result.chassis.rotationZeroThresholdMradS = 20;
     result.arm = {
-        110, 110, 55, 35, 55, 205, 35, 190, 125, 135, 105, 65, 135
+        static_cast<uint16_t>(config::FirstLinkMm),
+        static_cast<uint16_t>(config::SecondLinkMm),
+        static_cast<uint16_t>(config::ShoulderBaseHeightMm),
+        static_cast<uint16_t>(config::GripperLengthOffsetMm),
+        static_cast<uint16_t>(config::MinReachMm),
+        static_cast<uint16_t>(config::MaxReachMm),
+        static_cast<uint16_t>(config::MinHeightMm),
+        static_cast<uint16_t>(config::MaxHeightMm),
+        static_cast<uint16_t>(config::CargoClearanceHeightMm),
+        static_cast<uint16_t>(config::PresetReachMm),
+        static_cast<uint16_t>(config::PresetHeightMm),
+        static_cast<uint16_t>(config::StowReachMm),
+        static_cast<uint16_t>(config::StowHeightMm)
     };
 #if ROBOT_DRIVE_QUALIFICATION
     result.chassis.activeProfile = ResponseProfile::Low;
@@ -71,8 +80,6 @@ bool RuntimeConfig::validate() const {
             servos[index].centerOffsetDegrees < -90 ||
             servos[index].centerOffsetDegrees > 90 ||
             (servos[index].direction != 1 && servos[index].direction != -1)) return false;
-        if (motors[index].minimumPwm > motors[index].maximumPwm ||
-            (motors[index].direction != 1 && motors[index].direction != -1)) return false;
         if (uartOpenLoop[index].minimumPwm > uartOpenLoop[index].maximumPwm ||
             uartOpenLoop[index].maximumPwm > 100 ||
             (uartOpenLoop[index].direction != 1 && uartOpenLoop[index].direction != -1))
@@ -152,10 +159,6 @@ bool RuntimeConfig::applyParameter(
             candidate.servos[index] = {
                 data[0], data[1], static_cast<int8_t>(data[2]), static_cast<int8_t>(data[3])
             };
-            break;
-        case ParameterGroup::OpenLoopMotor:
-            if (index >= 4 || length != 3) return false;
-            candidate.motors[index] = {data[0], data[1], static_cast<int8_t>(data[2])};
             break;
         case ParameterGroup::UartOpenLoop:
             if (index >= 4 || length != 3) return false;

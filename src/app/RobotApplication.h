@@ -13,9 +13,7 @@
 #include "subsystems/SafetySupervisor.h"
 #include "subsystems/SensorSubsystem.h"
 
-#if defined(ROBOT_BACKEND_L293D)
-#include "drivers/L293DDriveBackend.h"
-#elif defined(ROBOT_BACKEND_UART)
+#if defined(ROBOT_BACKEND_UART)
 #include "drivers/UartEncoderDriveBackend.h"
 #else
 #include "drivers/NullDriveBackend.h"
@@ -32,9 +30,7 @@ class RobotApplication {
   private:
     SoftwareSerial bluetooth_;
     CommunicationSubsystem communication_;
-#if defined(ROBOT_BACKEND_L293D)
-    L293DDriveBackend driveBackend_;
-#elif defined(ROBOT_BACKEND_UART)
+#if defined(ROBOT_BACKEND_UART)
     UartEncoderDriveBackend driveBackend_;
 #else
     NullDriveBackend driveBackend_;
