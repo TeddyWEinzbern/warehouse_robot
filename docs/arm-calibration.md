@@ -59,9 +59,18 @@ In-session commands (type `help` any time to see this again):
 | `j2 +2` / `j2 -1` | Nudge relative to the last commanded angle |
 | `mark j2 center` | Record the current angle as that joint's center (options: lower/upper/center; the gripper uses open/closed instead) |
 | `dir j1 -1` | Record the direction sign |
-| `s` | Show each joint's commanded angle, firmware-reported angle, recorded marks, and the fold-angle estimate |
+| `sync` | Push recorded center+direction to the firmware (also runs automatically once a joint has both) |
+| `s` | Show each joint's commanded angle, firmware-reported angle, recorded marks, sync state, and the fold-angle estimate |
 | `export` | Print a code block ready to paste into BuildConfig.h |
 | `q` | Quit (servos hold their last position) |
+
+Important: the firmware's shoulder/elbow anti-collision guard computes the
+fold angle from the servo calibration it currently holds. Until you have
+marked `center` and set `dir` for both j1 and j2 (the session pushes them to
+the firmware automatically and prints `synced j1 ...`), the guard is running
+on default assumptions and can both block poses that are actually safe and
+allow poses that are not — move slowly and keep a hand on the arm until you
+see both joints synced.
 
 ## 3. Calibrate joint by joint
 
@@ -75,13 +84,16 @@ needs the shoulder to already have a position).
    with a square or by eye against a plumb line).
 3. `mark j1 center`
 4. Direction: send `j1 +5` and see whether the upper arm tilts toward the
-   robot's **front**. If yes → `dir j1 +1`; if reversed → `dir j1 -1`. Then
+   robot's **back**. If yes → `dir j1 +1`; if it tilts toward the front →
+   `dir j1 -1`. (Arms whose shoulder servo raises the raw angle to reach
+   forward are direction `-1`; that is normal, not a wiring mistake.) Then
    `j1 -5` to return to vertical.
-5. Both ends: keep sending `j1 +5` until any of the following happens, then
-   back off with `j1 -2` and `mark j1 upper`: (a) it hits a mechanical stop
-   or the servo strains audibly, (b) the command is rejected by the
-   firmware, (c) the session reports the fold angle approaching 138°. Do the
-   same in the other direction for `mark j1 lower`.
+5. Both ends: keep sending `j1 +5` until it hits a mechanical stop or the
+   servo strains audibly, then back off with `j1 -2` and `mark j1 upper`.
+   Do the same in the other direction for `mark j1 lower`. If the session
+   reports a coupling-guard block instead of a hard stop, that is not the
+   shoulder's travel end — move the elbow to a compatible angle first and
+   continue.
 
 ### 3.2 Elbow (j2)
 
@@ -93,9 +105,26 @@ needs the shoulder to already have a position).
 4. `mark j2 center`
 5. Direction: send `j2 +5`; if the forearm **tilts up**, `dir j2 +1`,
    otherwise `-1`.
-6. Both ends as with the shoulder; `s` shows the fold-angle estimate (the
-   guard hard-stops at 138°, so being blocked there is expected and just
-   means that end of travel has been reached — back off 2° and record it).
+6. Both ends — but note the elbow's ends are entangled with the shoulder:
+   sweeping the elbow down with the shoulder vertical runs into the
+   coupling guard long before the servo's own travel ends. That guard
+   boundary moves with the shoulder, so it must not be recorded as
+   `lower`/`upper` (they are absolute servo limits). Instead:
+   - Down end: first tilt the shoulder well forward (toward reaching out),
+     then sweep the elbow down until a hard stop; `mark j2 lower`.
+   - Up end: return the shoulder toward vertical or slightly back, sweep
+     the elbow up to a hard stop; `mark j2 upper`.
+   Whenever the session reports a guard block instead of a hard stop, move
+   the shoulder and keep going.
+
+Do not be surprised that the elbow's reachable window shifts as the
+shoulder moves: the invariant is the relative fold angle between the two
+links, not the raw servo difference. If your two servos are mirror-mounted
+(shoulder raw increases toward the front, elbow raw increases upward), the
+guard boundary in raw degrees satisfies `shoulder_raw + elbow_raw ≈
+constant` — e.g. measuring the elbow's guard limit at 50 with the shoulder
+at 90 predicts a limit near 40 when the shoulder raw goes to 100 (further
+forward), and near 60 at 80 (further back), not the other way around.
 
 ### 3.3 Base (j0)
 
@@ -178,6 +207,7 @@ arm won't drop); after a fault latch, send ClearFault before ARMing again.
 | Symptom | Cause and fix |
 | --- | --- |
 | Command replies `blocked by the shoulder/elbow coupling guard` | Hit the shoulder/elbow coupling guard (fold angle outside [-5°, 138°]) — this is the protection working, not a fault; back off, or move the other joint first |
+| Guard behaves backwards (blocks poses the mechanism clearly allows, e.g. laying the arm flat forward, or lets it fold dangerously far) | The firmware is still guarding with default direction/center for j1 or j2. Mark `center` and set `dir` for both joints and confirm the `synced j1`/`synced j2` messages (or run `sync`); `s` shows which joints are synced. If it still misbehaves after syncing, the recorded `dir` is wrong — re-run the direction test |
 | Command replies `invalid state` | The board isn't running the `arm_calibration` firmware, or it isn't DISARMED (the session sends DISARM automatically on start — restart the session) |
 | Arm stops short of the target mid-slew | Same guard; check `s` for the fold-angle estimate |
 | Arm goes limp then snaps after every command | You're using the one-shot `calibrate-joint` command; switch to the `calibrate` session |

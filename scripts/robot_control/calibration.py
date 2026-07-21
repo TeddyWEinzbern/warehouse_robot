@@ -14,8 +14,11 @@ from typing import Any, Callable
 
 from .protocol import (
     MessageType,
+    ParameterGroup,
     ProtocolDecoder,
+    build_parameter_data,
     encode_message,
+    encode_parameter_set,
     telemetry_to_dict,
 )
 
@@ -38,6 +41,9 @@ HELP_TEXT = """commands:
   mark j<n> <what> record the current angle of joint n as one of:
                    lower / upper / center (j3 uses open / closed instead)
   dir j<n> +1|-1   record the direction sign for joint n
+  sync             push recorded center+dir to the firmware so its
+                   coupling guard uses the real geometry (runs
+                   automatically once a joint has both)
   s                show commanded angles, telemetry, marks, fold estimate
   export           print the BuildConfig.h block from the recorded marks
   help             show this text
@@ -77,6 +83,8 @@ class CalibrationSession:
         self.telemetry: list[int] | None = None
         self.marks: dict[tuple[int, str], int] = {}
         self.directions: dict[int, int] = {}
+        self.revision: int | None = None
+        self.synced: dict[int, int] = {}
 
     # -- transport helpers --------------------------------------------------
 
@@ -101,22 +109,24 @@ class CalibrationSession:
                 decoded = telemetry_to_dict(message)
                 if decoded and decoded.get("kind") == "sensor_arm":
                     self.telemetry = list(decoded["servo_targets"])
+            elif message.message_type == MessageType.STATUS_TELEMETRY:
+                decoded = telemetry_to_dict(message)
+                if decoded and decoded.get("kind") == "status":
+                    self.revision = decoded["revision"]
+            elif (
+                message.message_type == MessageType.ACK
+                and len(message.payload) >= 3
+            ):
+                self.revision = int.from_bytes(message.payload[1:3], "little")
         return messages
 
-    def _command_joint(self, joint: int, angle: int) -> None:
-        self._send(
-            MessageType.CALIBRATION_COMMAND, struct.pack("<BB", joint, angle)
-        )
+    def _await_reply(self) -> Any:
+        """Pump until an ACK or NACK arrives; raise on NACK or timeout."""
         deadline = self.clock() + ACK_TIMEOUT_S
         while self.clock() < deadline:
             for message in self._pump():
                 if message.message_type == MessageType.ACK:
-                    self.commanded[joint] = angle
-                    self.out(
-                        f"{JOINT_NAMES[joint]} (j{joint}) -> {angle} deg"
-                        " (slewing at 60 deg/s)"
-                    )
-                    return
+                    return message
                 if message.message_type == MessageType.NACK:
                     reason = (
                         message.payload[1] if len(message.payload) > 1 else 0
@@ -127,6 +137,75 @@ class CalibrationSession:
                     )
             self.sleep(0.01)
         raise CalibrationError("timed out waiting for the firmware acknowledgement")
+
+    def _command_joint(self, joint: int, angle: int) -> None:
+        self._send(
+            MessageType.CALIBRATION_COMMAND, struct.pack("<BB", joint, angle)
+        )
+        self._await_reply()
+        self.commanded[joint] = angle
+        self.out(
+            f"{JOINT_NAMES[joint]} (j{joint}) -> {angle} deg"
+            " (slewing at 60 deg/s)"
+        )
+
+    # -- firmware sync ------------------------------------------------------
+
+    def _center_mark(self, joint: int) -> int | None:
+        return self.marks.get((joint, "open" if joint == 3 else "center"))
+
+    def _sync_joint(self, joint: int) -> None:
+        """Push center+direction to the firmware so the coupling guard uses
+        the real geometry. Travel limits stay wide open (0-180) during
+        calibration; the final narrow limits go into BuildConfig.h instead."""
+        center = self._center_mark(joint)
+        direction = self.directions.get(joint)
+        if center is None or direction is None:
+            return
+        self._pump()
+        if self.revision is None:
+            self.out(
+                f"sync deferred for j{joint}: no firmware revision seen yet;"
+                " wait a second and run `sync`"
+            )
+            return
+        data = build_parameter_data(
+            ParameterGroup.SERVO, joint,
+            {
+                "lower": 0, "upper": 180,
+                "center_offset": center - 90, "direction": direction,
+            },
+        )
+        for attempt in (1, 2):
+            self.link.write(encode_parameter_set(
+                self._next_sequence(), ParameterGroup.SERVO, joint,
+                self.revision, data,
+            ))
+            try:
+                self._await_reply()
+            except CalibrationError as error:
+                if "revision mismatch" in str(error) and attempt == 1:
+                    continue
+                self.out(f"warning: firmware sync for j{joint} failed: {error}")
+                return
+            self.synced[joint] = self.revision
+            self.out(
+                f"synced j{joint} center/direction to the firmware"
+                f" (revision {self.revision}); coupling guard now uses it"
+            )
+            return
+
+    def _sync_all(self) -> None:
+        pending = False
+        for joint in range(JOINT_COUNT):
+            if self._center_mark(joint) is not None and joint in self.directions:
+                self._sync_joint(joint)
+                pending = True
+        if not pending:
+            self.out(
+                "nothing to sync yet: a joint needs both a center mark"
+                " (open for j3) and a `dir` before it can be pushed"
+            )
 
     # -- state helpers ------------------------------------------------------
 
@@ -172,6 +251,8 @@ class CalibrationSession:
                 self._handle_mark(tokens)
             elif tokens[0] == "dir":
                 self._handle_direction(tokens)
+            elif tokens[0] == "sync":
+                self._sync_all()
             elif tokens[0] == "export":
                 self.out(self.export_block())
             elif tokens[0].startswith("j"):
@@ -221,6 +302,8 @@ class CalibrationSession:
         angle = self._current_angle(joint)
         self.marks[(joint, name)] = angle
         self.out(f"marked j{joint} {name} = {angle} deg")
+        if name in ("center", "open"):
+            self._sync_joint(joint)
 
     def _handle_direction(self, tokens: list[str]) -> None:
         if len(tokens) != 3 or tokens[2] not in ("+1", "-1", "1"):
@@ -228,6 +311,7 @@ class CalibrationSession:
         joint = _parse_joint(tokens[1])
         self.directions[joint] = 1 if tokens[2] in ("+1", "1") else -1
         self.out(f"j{joint} direction = {self.directions[joint]:+d}")
+        self._sync_joint(joint)
 
     def _show_status(self) -> None:
         self._pump()
@@ -250,6 +334,11 @@ class CalibrationSession:
         fold = self._fold_estimate()
         if fold is not None:
             lines.append(f"fold estimate: {fold:.0f} deg (guard stops at 138)")
+        synced = ", ".join(f"j{joint}" for joint in sorted(self.synced))
+        lines.append(
+            f"firmware sync: {synced or 'none'}"
+            " (unsynced joints leave the guard on default direction/center)"
+        )
         self.out("\n".join(lines))
 
     # -- export -------------------------------------------------------------

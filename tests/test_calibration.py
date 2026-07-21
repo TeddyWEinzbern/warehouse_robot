@@ -6,7 +6,7 @@ import struct
 import unittest
 
 from robot_control.calibration import CalibrationSession
-from robot_control.protocol import MessageType, encode_message
+from robot_control.protocol import MessageType, ProtocolDecoder, encode_message
 
 
 class FakeLink:
@@ -51,8 +51,19 @@ class Clock:
         return self.now
 
 
-def ack(sequence: int = 1) -> bytes:
-    return encode_message(MessageType.ACK, sequence, bytes([0x11, 0, 0]))
+def ack(sequence: int = 1, revision: int = 0) -> bytes:
+    payload = bytes([0x11]) + revision.to_bytes(2, "little")
+    return encode_message(MessageType.ACK, sequence, payload)
+
+
+def bare_ack(sequence: int = 1) -> bytes:
+    return encode_message(MessageType.ACK, sequence, bytes([0x11]))
+
+
+def status(revision: int) -> bytes:
+    payload = bytes([1, 0]) + b"\x00" * 6 + bytes([0, 0])
+    payload += revision.to_bytes(2, "little") + b"\x00\x00"
+    return encode_message(MessageType.STATUS_TELEMETRY, 7, payload)
 
 
 def nack(reason: int, sequence: int = 1) -> bytes:
@@ -132,7 +143,7 @@ class MarkAndStatusTests(unittest.TestCase):
 
     def test_fold_estimate_uses_marked_centers_and_directions(self):
         link = FakeLink()
-        for sequence in range(1, 5):
+        for sequence in range(1, 6):
             link.queue_reply(ack(sequence))
         session, output = make_session(link)
         session.handle_line("j1 90")
@@ -143,6 +154,49 @@ class MarkAndStatusTests(unittest.TestCase):
         session.handle_line("dir j2 +1")
         session.handle_line("j2 45")
         self.assertIn("fold estimate: 135", output[-1])
+
+
+class FirmwareSyncTests(unittest.TestCase):
+    def test_center_plus_dir_pushes_servo_parameters_to_firmware(self):
+        link = FakeLink()
+        link.queue_reply(ack(1))
+        session, output = make_session(link)
+        session.handle_line("j1 88")
+        link._pending += status(revision=4)
+        link.queue_reply(ack(2, revision=5))
+        session.handle_line("mark j1 center")
+        link.queue_reply(ack(3, revision=6))
+        session.handle_line("dir j1 -1")
+        sent = ProtocolDecoder().feed(b"".join(link.written))
+        parameter_frames = [
+            message.payload for message in sent
+            if message.message_type == MessageType.PARAMETER_SET
+        ]
+        self.assertEqual(len(parameter_frames), 1)
+        self.assertEqual(
+            parameter_frames[0],
+            struct.pack("<BBH", 1, 1, 4) + struct.pack("<BBbb", 0, 180, -2, -1),
+        )
+        self.assertEqual(session.synced.get(1), 5)
+        self.assertTrue(any("synced j1" in line for line in output))
+
+    def test_sync_deferred_without_firmware_revision(self):
+        link = FakeLink()
+        link.queue_reply(bare_ack(1))
+        session, output = make_session(link)
+        session.handle_line("j2 95")
+        session.handle_line("mark j2 center")
+        session.handle_line("dir j2 +1")
+        self.assertIn(2, session.directions)
+        self.assertNotIn(2, session.synced)
+        self.assertTrue(any("sync deferred" in line for line in output))
+        self.assertEqual(len(link.written), 1)
+
+    def test_manual_sync_reports_when_nothing_is_ready(self):
+        link = FakeLink()
+        session, output = make_session(link)
+        session.handle_line("sync")
+        self.assertTrue(any("nothing to sync" in line for line in output))
 
 
 class ExportTests(unittest.TestCase):
