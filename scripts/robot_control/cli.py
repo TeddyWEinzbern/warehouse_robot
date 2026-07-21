@@ -98,6 +98,12 @@ def parse_args() -> argparse.Namespace:
     calibrate.add_argument("--port", required=True)
     calibrate.add_argument("--joint", type=int, choices=range(4), required=True)
     calibrate.add_argument("--angle", type=int, choices=range(181), required=True)
+
+    session = subcommands.add_parser(
+        "calibrate",
+        help="Interactive arm calibration session (keeps the port open)",
+    )
+    session.add_argument("--port", required=True)
     return parser.parse_args()
 
 
@@ -138,6 +144,12 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "calibrate-joint":
         validate_serial_device(args.port)
         return calibrate_joint(args.port, args.joint, args.angle)
+    if args.command == "calibrate":
+        from .calibration import run_session
+
+        validate_serial_device(args.port)
+        with open_port(args.port, 115200) as link:
+            return run_session(link)
     if args.reconnect_attempts < 1 or not 1 <= args.web_port <= 65535:
         raise SystemExit("Reconnect attempts and web port must be positive")
     try:

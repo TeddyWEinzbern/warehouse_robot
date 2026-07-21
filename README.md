@@ -56,6 +56,10 @@ pio run -e uart_open_loop_calibration
 pio run -e arm_calibration
 ```
 
+Arm servo calibration (interactive `warehouse-robot calibrate` session and the
+BuildConfig write-back) is documented step by step in
+[docs/arm-calibration.md](docs/arm-calibration.md).
+
 The standard firmware profiles use 38400 baud, but the HC-05 data-mode baud must
 match the configured module. The 9600-baud compatibility profiles reduce
 firmware telemetry to 5 Hz and require the host's 9600-baud mode, which reduces

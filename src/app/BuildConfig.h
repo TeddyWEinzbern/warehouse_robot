@@ -106,6 +106,16 @@ constexpr uint8_t ElbowZeroDegrees = 90;
 constexpr uint8_t GripperOpenDegrees = 80;
 constexpr uint8_t GripperClosedDegrees = 25;
 
+// Per-joint servo calibration measured with docs/arm-calibration.md.
+// Joint order: 0 base, 1 shoulder, 2 elbow, 3 gripper. The `calibrate`
+// REPL's `export` command prints this whole block ready to paste.
+constexpr uint8_t ServoLowerDegrees[4] = {0, 0, 0, 0};
+constexpr uint8_t ServoUpperDegrees[4] = {180, 180, 180, 180};
+constexpr uint8_t ServoCenterDegrees[4] = {
+    BaseZeroDegrees, ShoulderZeroDegrees, ElbowZeroDegrees, GripperOpenDegrees
+};
+constexpr int8_t ServoDirectionSign[4] = {1, 1, 1, 1};
+
 constexpr uint16_t NormalDriveLimitPermille = 1000;
 constexpr uint16_t CargoDriveLimitPermille = 450;
 constexpr uint16_t AssistDriveLimitPermille = 180;

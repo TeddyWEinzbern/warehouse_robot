@@ -13,12 +13,13 @@ uint16_t readU16(const uint8_t *data) { return static_cast<uint16_t>(readI16(dat
 
 RuntimeConfig RuntimeConfig::defaults() {
     RuntimeConfig result = {};
-    const uint8_t centers[4] = {
-        config::BaseZeroDegrees, config::ShoulderZeroDegrees,
-        config::ElbowZeroDegrees, config::GripperOpenDegrees
-    };
     for (uint8_t index = 0; index < 4; ++index) {
-        result.servos[index] = {0, 180, static_cast<int8_t>(centers[index] - 90), 1};
+        result.servos[index] = {
+            config::ServoLowerDegrees[index],
+            config::ServoUpperDegrees[index],
+            static_cast<int8_t>(config::ServoCenterDegrees[index] - 90),
+            config::ServoDirectionSign[index]
+        };
         result.uartOpenLoop[index] = {0, 100, 1};
         result.encoder.channelMap[index] = static_cast<int8_t>(index);
         result.encoder.commandMap[index] = static_cast<int8_t>(index);
