@@ -50,49 +50,34 @@ RobotApplication::RobotApplication()
       previousState_(RobotState::Boot) {}
 
 Stream &RobotApplication::hostStream() {
-#if ROBOT_ARM_CALIBRATION
-    return Serial;
-#else
+    // The hardware UART (D0/D1) always belongs to the motor board; the host
+    // link is the A4/A5 SoftwareSerial in every profile, calibration
+    // included (HC-05 or USB-TTL adapter).
     return bluetooth_;
-#endif
 }
 
 RobotProfile RobotApplication::profile() const {
-#if ROBOT_SAFE_IDLE
-    return RobotProfile::SafeIdle;
-#elif ROBOT_ARM_CALIBRATION
-    return RobotProfile::ArmCalibration;
-#elif defined(ROBOT_BACKEND_L293D)
-    return RobotProfile::L293DDevelopment;
+#if ROBOT_CALIBRATION
+    return RobotProfile::Calibration;
 #elif defined(ROBOT_UART_OPEN_LOOP)
-    return RobotProfile::UartOpenLoopCalibration;
-#elif ROBOT_DRIVE_QUALIFICATION
-    return RobotProfile::UartClosedLoopQualification;
+    return RobotProfile::UartOpenLoopRobot;
 #else
     return RobotProfile::UartClosedLoopRobot;
 #endif
 }
 
 bool RobotApplication::profileCanArm() const {
-#if ROBOT_SAFE_IDLE || ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
     return false;
-#elif defined(ROBOT_UART_CLOSED_LOOP) && !ROBOT_DRIVE_QUALIFICATION
-    return config::DriveCalibrationQualified;
 #else
-    return true;
+    return config::DriveCalibrated;
 #endif
 }
 
-bool RobotApplication::sonarEnabled() const {
-#if ROBOT_SAFE_IDLE || ROBOT_ARM_CALIBRATION || ROBOT_DRIVE_QUALIFICATION
-    return false;
-#else
-    return true;
-#endif
-}
+bool RobotApplication::sonarEnabled() const { return true; }
 
 bool RobotApplication::armMotionEnabled() const {
-#if ROBOT_SAFE_IDLE || ROBOT_DRIVE_QUALIFICATION
+#if ROBOT_CALIBRATION
     return false;
 #else
     return arm_.calibrated();
@@ -100,11 +85,7 @@ bool RobotApplication::armMotionEnabled() const {
 }
 
 void RobotApplication::begin() {
-#if ROBOT_ARM_CALIBRATION
-    Serial.begin(config::UsbBaud);
-#else
     bluetooth_.begin(config::BluetoothBaud);
-#endif
     chassis_.begin(runtime_);
     arm_.begin(runtime_);
     if (sonarEnabled()) sensors_.begin();
@@ -148,7 +129,7 @@ void RobotApplication::processHostMessages(
             );
         } else if (!runtime_.applyParameter(
                        parameter.group, parameter.index, parameter.data,
-                       parameter.length, config::DriveCalibrationQualified
+                       parameter.length, config::DriveCalibrated
                    )) {
             communication_.sendNack(
                 hostStream(), parameter.sequence, MessageType::ParameterSet,
@@ -164,33 +145,95 @@ void RobotApplication::processHostMessages(
 
     PendingCalibration calibration = {};
     if (communication_.transmitIdle() && communication_.takeCalibration(calibration)) {
-#if ROBOT_ARM_CALIBRATION
-        if (safety_.state() == RobotState::Disarmed && calibration.joint < 4 &&
-            calibration.degrees <= 180) {
-            arm_.setCalibrationJoint(calibration.joint, calibration.degrees);
-            communication_.sendAck(
-                hostStream(), calibration.sequence,
-                MessageType::CalibrationCommand, runtime_.revision
-            );
-        } else
-#endif
-        {
+#if ROBOT_CALIBRATION
+        if (safety_.state() != RobotState::Disarmed || calibration.joint >= 4 ||
+            calibration.degrees > 180) {
             communication_.sendNack(
                 hostStream(), calibration.sequence,
                 MessageType::CalibrationCommand, NackReason::InvalidState
             );
+        } else if (!arm_.setCalibrationJoint(
+                       calibration.joint, calibration.degrees, runtime_
+                   )) {
+            // Rejected by the joint-coupling guard (four-bar fold band).
+            communication_.sendNack(
+                hostStream(), calibration.sequence,
+                MessageType::CalibrationCommand, NackReason::ValidationFailed
+            );
+        } else {
+            communication_.sendAck(
+                hostStream(), calibration.sequence,
+                MessageType::CalibrationCommand, runtime_.revision
+            );
         }
+#else
+        communication_.sendNack(
+            hostStream(), calibration.sequence,
+            MessageType::CalibrationCommand, NackReason::InvalidState
+        );
+#endif
+    }
+
+    PendingDriveCalibration spin = {};
+    if (communication_.transmitIdle() && communication_.takeDriveCalibration(spin)) {
+#if ROBOT_CALIBRATION
+        const int16_t magnitude = spin.value < 0
+            ? static_cast<int16_t>(-spin.value) : spin.value;
+        const int16_t limit = spin.mode == 0
+            ? config::CalibrationSpinLimitPercent
+            : config::CalibrationWheelLimitMmS;
+        if (safety_.state() != RobotState::Disarmed) {
+            communication_.sendNack(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, NackReason::InvalidState
+            );
+        } else if (spin.mode > 1 || spin.channel > 3 || magnitude > limit ||
+                   spin.durationMs > config::CalibrationSpinMaxDurationMs) {
+            communication_.sendNack(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, NackReason::ValidationFailed
+            );
+        } else if (!driveBackend_.startCalibrationSpin(
+                       spin.mode, spin.channel, spin.value, spin.durationMs,
+                       millis()
+                   )) {
+            // Motor board not initialized yet (still settling or faulted).
+            communication_.sendNack(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, NackReason::InvalidState
+            );
+        } else {
+            communication_.sendAck(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, runtime_.revision
+            );
+        }
+#else
+        communication_.sendNack(
+            hostStream(), spin.sequence,
+            MessageType::DriveCalibrationCommand, NackReason::InvalidState
+        );
+#endif
     }
 }
 
 void RobotApplication::enforceSafetyStop(uint32_t nowMs) {
     if (!safety_.takeImmediateStop()) return;
     chassis_.forceZero(nowMs);
+#if !ROBOT_CALIBRATION
     assist_.cancel();
+#endif
     arm_.holdLastCommanded();
 }
 
 void RobotApplication::updateMotionIntent(uint32_t nowMs) {
+#if ROBOT_CALIBRATION
+    // The calibration profile can never arm: motors only move through the
+    // DISARMED calibration spin path and the backend's zero keepalive, so
+    // the whole motion-intent pipeline (assist, presets, chassis ramp) is
+    // compiled out to keep the image inside flash.
+    (void)nowMs;
+#else
     const bool motionAllowed = safety_.armed();
     if (!motionAllowed) {
         assist_.cancel();
@@ -211,6 +254,7 @@ void RobotApplication::updateMotionIntent(uint32_t nowMs) {
         activeFrame_, assistOutput_, arm_.cargoMayBeHeld(), runtime_
     );
     chassis_.setDesired(intent, runtime_);
+#endif
 }
 
 void RobotApplication::evaluateMissWindow(uint32_t nowUs) {
@@ -235,7 +279,9 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
             elapsedUs = config::MaxMotionDtUs;
             saturatingIncrement(motionDtClamps_);
         }
+#if !ROBOT_CALIBRATION
         if (safety_.armed()) chassis_.trajectoryTick(nowUs, elapsedUs, runtime_);
+#endif
         if (safety_.armed() && chassisTask_.stats().consecutiveMisses >= 3)
             safety_.latchFault(FaultSchedulerOverrun);
         enforceSafetyStop(nowMs);
@@ -250,7 +296,9 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
         if (safety_.armed() && consecutiveMotorLate_ >= 2)
             safety_.latchFault(FaultSchedulerOverrun);
         enforceSafetyStop(nowMs);
+#if !ROBOT_CALIBRATION
         if (safety_.armed()) chassis_.motorTick(nowMs, true, runtime_);
+#endif
     }
 
     if (encoderTask_.due(nowUs))
@@ -262,8 +310,12 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
             elapsedUs = config::MaxMotionDtUs;
             saturatingIncrement(motionDtClamps_);
         }
+#if ROBOT_CALIBRATION
+        arm_.calibrationTick(elapsedUs, runtime_);
+#else
         if (safety_.armed() && armMotionEnabled())
             arm_.update(activeFrame_, elapsedUs, runtime_);
+#endif
         if (safety_.armed() && servoTask_.stats().consecutiveMisses >= 3)
             safety_.latchFault(FaultSchedulerOverrun);
         if (arm_.faulted()) safety_.latchFault(FaultArmTarget);
@@ -339,7 +391,7 @@ void RobotApplication::update() {
         previousState_ = safety_.state();
     }
     const bool hostTransmitWindow =
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
         true;
 #else
         activeFrame_.valid && nowMs - activeFrame_.receivedAtMs <=
@@ -364,9 +416,9 @@ void RobotApplication::sendHello() {
         static_cast<uint8_t>(capabilities.mode),
         static_cast<uint8_t>(capabilities.pwmUnit),
         static_cast<uint8_t>(
-            (config::DriveCalibrationQualified ? 1U : 0U) |
+            (config::DriveCalibrated ? 1U : 0U) |
             (arm_.calibrated() ? 2U : 0U) |
-            (ROBOT_DRIVE_QUALIFICATION ? 4U : 0U) |
+            (ROBOT_CALIBRATION ? 4U : 0U) |
             (capabilities.encoderFeedback ? 8U : 0U)
         ),
         static_cast<uint8_t>(runtime_.revision),
@@ -385,12 +437,14 @@ void RobotApplication::sendStatus(uint32_t nowMs) {
     status_.state = safety_.state();
     status_.assistStage = assistOutput_.stage;
     status_.faults = static_cast<uint16_t>(safety_.faults() | drive.faults);
-    status_.warnings = drive.warnings;
+    status_.warnings = static_cast<uint16_t>(
+        drive.warnings | (arm_.targetLimited() ? WarningArmTargetLimited : 0U)
+    );
     status_.commandAgeMs = saturatingAge(nowMs, activeFrame_.receivedAtMs);
     status_.cargoMayBeHeld = arm_.cargoMayBeHeld();
     status_.linkAlive = safety_.linkAlive();
     status_.emergencyStopped = safety_.emergencyStopped();
-    status_.driveCalibrationQualified = config::DriveCalibrationQualified;
+    status_.driveCalibrated = config::DriveCalibrated;
     uint8_t payload[14];
     uint8_t offset = 0;
     payload[offset++] = static_cast<uint8_t>(status_.state);
@@ -402,7 +456,7 @@ void RobotApplication::sendStatus(uint32_t nowMs) {
         (status_.linkAlive ? 1U : 0U) |
         (status_.emergencyStopped ? 2U : 0U) |
         (status_.cargoMayBeHeld ? 4U : 0U) |
-        (status_.driveCalibrationQualified ? 8U : 0U)
+        (status_.driveCalibrated ? 8U : 0U)
     );
     payload[offset++] = static_cast<uint8_t>(runtime_.chassis.activeProfile);
     putU16(payload, offset, runtime_.revision);
@@ -562,16 +616,11 @@ bool RobotApplication::sendNextParameterSnapshot() {
         data[2] = static_cast<uint8_t>(value.centerOffsetDegrees);
         data[3] = static_cast<uint8_t>(value.direction); length = 4;
     } else if (snapshotCursor_ < 8) {
-        group = ParameterGroup::OpenLoopMotor; index = snapshotCursor_ - 4;
-        const MotorCalibration &value = runtime_.motors[index];
-        data[0] = value.minimumPwm; data[1] = value.maximumPwm;
-        data[2] = static_cast<uint8_t>(value.direction); length = 3;
-    } else if (snapshotCursor_ < 12) {
-        group = ParameterGroup::UartOpenLoop; index = snapshotCursor_ - 8;
+        group = ParameterGroup::UartOpenLoop; index = snapshotCursor_ - 4;
         const MotorCalibration &value = runtime_.uartOpenLoop[index];
         data[0] = value.minimumPwm; data[1] = value.maximumPwm;
         data[2] = static_cast<uint8_t>(value.direction); length = 3;
-    } else if (snapshotCursor_ == 12) {
+    } else if (snapshotCursor_ == 8) {
         group = ParameterGroup::ChassisSpeed;
         int16_t values[5] = {
             runtime_.chassis.maximumForwardMmS,
@@ -584,7 +633,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 13) {
+    } else if (snapshotCursor_ == 9) {
         group = ParameterGroup::ChassisAcceleration; index = 0;
         const uint16_t values[8] = {
             runtime_.chassis.acceleration.forwardAccelMmS2,
@@ -600,7 +649,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 14) {
+    } else if (snapshotCursor_ == 10) {
         group = ParameterGroup::ChassisAcceleration; index = 1;
         const uint16_t values[3] = {
             runtime_.chassis.acceleration.zeroCrossingHoldMs,
@@ -611,7 +660,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 15) {
+    } else if (snapshotCursor_ == 11) {
         group = ParameterGroup::Encoder; index = 0;
         const uint16_t values[4] = {
             runtime_.encoder.wheelDiameterMm, runtime_.encoder.countsPerRevolution,
@@ -622,21 +671,21 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
         data[length++] = static_cast<uint8_t>(runtime_.encoder.semantics);
-    } else if (snapshotCursor_ == 16 || snapshotCursor_ == 17) {
+    } else if (snapshotCursor_ == 12 || snapshotCursor_ == 13) {
         group = ParameterGroup::Encoder;
-        index = snapshotCursor_ == 16 ? 1 : 2;
+        index = snapshotCursor_ == 12 ? 1 : 2;
         const int8_t *map = index == 1
             ? runtime_.encoder.channelMap : runtime_.encoder.commandMap;
         const int8_t *signs = index == 1
             ? runtime_.encoder.signs : runtime_.encoder.commandSigns;
         for (uint8_t i = 0; i < 4; ++i) data[length++] = static_cast<uint8_t>(map[i]);
         for (uint8_t i = 0; i < 4; ++i) data[length++] = static_cast<uint8_t>(signs[i]);
-    } else if (snapshotCursor_ < 24) {
-        group = ParameterGroup::Sensor; index = snapshotCursor_ - 18;
+    } else if (snapshotCursor_ < 20) {
+        group = ParameterGroup::Sensor; index = snapshotCursor_ - 14;
         const int16_t value = runtime_.sensorOffsetMm[index];
         data[0] = static_cast<uint8_t>(value);
         data[1] = static_cast<uint8_t>(value >> 8); length = 2;
-    } else if (snapshotCursor_ == 24) {
+    } else if (snapshotCursor_ == 20) {
         group = ParameterGroup::Assist;
         const uint16_t values[3] = {
             runtime_.normalDriveLimitPermille,
@@ -647,15 +696,15 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-    } else if (snapshotCursor_ == 25) {
+    } else if (snapshotCursor_ == 21) {
         group = ParameterGroup::ResponseProfile;
         data[0] = static_cast<uint8_t>(runtime_.chassis.activeProfile);
         length = 1;
-    } else if (snapshotCursor_ < 29) {
+    } else if (snapshotCursor_ < 25) {
         group = ParameterGroup::ResponseProfile;
-        index = snapshotCursor_ - 25;
+        index = snapshotCursor_ - 21;
         const ResponseProfileDefinition &definition =
-            runtime_.responseProfiles[snapshotCursor_ - 26];
+            runtime_.responseProfiles[snapshotCursor_ - 22];
         const uint16_t values[3] = {
             definition.speedPermille, definition.accelerationPermille,
             definition.decelerationPermille
@@ -664,10 +713,10 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
     } else {
         group = ParameterGroup::ArmGeometry;
-        index = snapshotCursor_ - 29;
+        index = snapshotCursor_ - 25;
         if (index == 0) {
             const uint16_t values[8] = {
                 runtime_.arm.firstLinkMm, runtime_.arm.secondLinkMm,
@@ -702,10 +751,10 @@ bool RobotApplication::sendNextParameterSnapshot() {
         payload, offset
     );
     if (++snapshotCursor_ >=
-#if ROBOT_ARM_CALIBRATION
-            31
+#if ROBOT_CALIBRATION
+            27
 #else
-            29
+            25
 #endif
        ) snapshotActive_ = false;
     return true;
@@ -727,16 +776,25 @@ void RobotApplication::sendTelemetry(uint32_t nowMs) {
         // Parameter snapshots use detail slots so status remains live.
     } else {
         switch ((telemetryDetailSlot_ / 2U) % 6U) {
+#if ROBOT_CALIBRATION
+            // Chassis intent and open-loop PWM mirrors are meaningless while
+            // the profile cannot arm; their slots repeat the status frame.
+            case 0: sendStatus(nowMs); break;
+#else
             case 0: sendDriveCommand(nowMs); break;
+#endif
             case 1: sendDriveFeedback(nowMs); break;
             case 2: sendEncoderTotals(nowMs); break;
             case 3: sendScheduler(); break;
             case 4: sendSensorArm(nowMs); break;
             default:
-                if (driveBackend_.capabilities().pwmUnit == PwmUnit::Unavailable)
-                    sendStatus(nowMs);
-                else
+#if !ROBOT_CALIBRATION
+                if (driveBackend_.capabilities().pwmUnit != PwmUnit::Unavailable) {
                     sendOpenLoopPwm();
+                    break;
+                }
+#endif
+                sendStatus(nowMs);
                 break;
         }
     }

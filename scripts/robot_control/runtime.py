@@ -38,6 +38,7 @@ CONTROL_MODE_NAMES = [
 PROFILE_NAMES = [
     "safe_idle", "l293d_dev", "uart_closed_loop_qualification",
     "uart_closed_loop_robot", "uart_open_loop_calibration", "arm_calibration",
+    "robot_open_loop", "calibration",
 ]
 
 ONE_WAY_UNAVAILABLE_ACTIONS = frozenset(

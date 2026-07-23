@@ -13,28 +13,23 @@ uint16_t readU16(const uint8_t *data) { return static_cast<uint16_t>(readI16(dat
 
 RuntimeConfig RuntimeConfig::defaults() {
     RuntimeConfig result = {};
-    const uint8_t centers[4] = {
-        config::BaseZeroDegrees, config::ShoulderZeroDegrees,
-        config::ElbowZeroDegrees, config::GripperOpenDegrees
-    };
     for (uint8_t index = 0; index < 4; ++index) {
-        result.servos[index] = {0, 180, static_cast<int8_t>(centers[index] - 90), 1};
-        result.motors[index] = {
-            static_cast<uint8_t>(index < 2 ? 30 : 35), 70, 1
+        result.servos[index] = {
+            config::ServoLowerDegrees[index],
+            config::ServoUpperDegrees[index],
+            static_cast<int8_t>(config::ServoCenterDegrees[index] - 90),
+            config::ServoDirectionSign[index]
         };
         result.uartOpenLoop[index] = {0, 100, 1};
-        result.encoder.channelMap[index] = static_cast<int8_t>(index);
-        result.encoder.commandMap[index] = static_cast<int8_t>(index);
-        result.encoder.commandSigns[index] = 1;
+        result.encoder.channelMap[index] = config::EncoderChannelMap[index];
+        result.encoder.signs[index] = config::EncoderDirectionSign[index];
+        result.encoder.commandMap[index] = config::MotorCommandMap[index];
+        result.encoder.commandSigns[index] = config::MotorCommandSign[index];
     }
-    result.encoder.signs[0] = -1;
-    result.encoder.signs[1] = 1;
-    result.encoder.signs[2] = -1;
-    result.encoder.signs[3] = 1;
-    result.encoder.wheelDiameterMm = 60;
-    result.encoder.countsPerRevolution = 4680;
-    result.encoder.wheelTrackMm = 160;
-    result.encoder.wheelbaseMm = 170;
+    result.encoder.wheelDiameterMm = config::WheelDiameterMm;
+    result.encoder.countsPerRevolution = config::EncoderCountsPerRevolution;
+    result.encoder.wheelTrackMm = config::WheelTrackMm;
+    result.encoder.wheelbaseMm = config::WheelbaseMm;
     result.encoder.semantics = EncoderSampleSemantics::ProvisionalFixed20Ms;
     result.chassis.maximumForwardMmS = 1000;
     result.chassis.maximumReverseMmS = 1000;
@@ -45,13 +40,21 @@ RuntimeConfig RuntimeConfig::defaults() {
     result.chassis.translationZeroThresholdMmS = 10;
     result.chassis.rotationZeroThresholdMradS = 20;
     result.arm = {
-        110, 110, 55, 35, 55, 205, 35, 190, 125, 135, 105, 65, 135
+        static_cast<uint16_t>(config::FirstLinkMm),
+        static_cast<uint16_t>(config::SecondLinkMm),
+        static_cast<uint16_t>(config::ShoulderBaseHeightMm),
+        static_cast<uint16_t>(config::GripperLengthOffsetMm),
+        static_cast<uint16_t>(config::MinReachMm),
+        static_cast<uint16_t>(config::MaxReachMm),
+        static_cast<uint16_t>(config::MinHeightMm),
+        static_cast<uint16_t>(config::MaxHeightMm),
+        static_cast<uint16_t>(config::CargoClearanceHeightMm),
+        static_cast<uint16_t>(config::PresetReachMm),
+        static_cast<uint16_t>(config::PresetHeightMm),
+        static_cast<uint16_t>(config::StowReachMm),
+        static_cast<uint16_t>(config::StowHeightMm)
     };
-#if ROBOT_DRIVE_QUALIFICATION
-    result.chassis.activeProfile = ResponseProfile::Low;
-#else
     result.chassis.activeProfile = ResponseProfile::Normal;
-#endif
     result.responseProfiles[0] = {500, 500, 500};
     result.responseProfiles[1] = {1000, 1000, 1000};
     result.responseProfiles[2] = {1000, 1500, 1250};
@@ -71,8 +74,6 @@ bool RuntimeConfig::validate() const {
             servos[index].centerOffsetDegrees < -90 ||
             servos[index].centerOffsetDegrees > 90 ||
             (servos[index].direction != 1 && servos[index].direction != -1)) return false;
-        if (motors[index].minimumPwm > motors[index].maximumPwm ||
-            (motors[index].direction != 1 && motors[index].direction != -1)) return false;
         if (uartOpenLoop[index].minimumPwm > uartOpenLoop[index].maximumPwm ||
             uartOpenLoop[index].maximumPwm > 100 ||
             (uartOpenLoop[index].direction != 1 && uartOpenLoop[index].direction != -1))
@@ -122,7 +123,7 @@ bool RuntimeConfig::validate() const {
         a.zeroCrossingHoldMs > 500 ||
         chassis.translationZeroThresholdMmS > 100 ||
         chassis.rotationZeroThresholdMradS > 200) return false;
-#if ROBOT_ARM_CALIBRATION || ROBOT_ARM_CALIBRATED
+#if ROBOT_CALIBRATION || ROBOT_ARM_CALIBRATED
     if (arm.firstLinkMm < 20 || arm.firstLinkMm > 300 ||
         arm.secondLinkMm < 20 || arm.secondLinkMm > 300 ||
         arm.shoulderBaseHeightMm > 500 || arm.gripperLengthOffsetMm > 200 ||
@@ -152,10 +153,6 @@ bool RuntimeConfig::applyParameter(
             candidate.servos[index] = {
                 data[0], data[1], static_cast<int8_t>(data[2]), static_cast<int8_t>(data[3])
             };
-            break;
-        case ParameterGroup::OpenLoopMotor:
-            if (index >= 4 || length != 3) return false;
-            candidate.motors[index] = {data[0], data[1], static_cast<int8_t>(data[2])};
             break;
         case ParameterGroup::UartOpenLoop:
             if (index >= 4 || length != 3) return false;
@@ -220,9 +217,6 @@ bool RuntimeConfig::applyParameter(
         case ParameterGroup::ResponseProfile:
             if (index == 0 && length == 1 &&
                 data[0] <= static_cast<uint8_t>(ResponseProfile::Aggressive)) {
-#if ROBOT_DRIVE_QUALIFICATION
-                if (data[0] != static_cast<uint8_t>(ResponseProfile::Low)) return false;
-#endif
                 candidate.chassis.activeProfile = static_cast<ResponseProfile>(data[0]);
                 if (candidate.chassis.activeProfile == ResponseProfile::Aggressive &&
                     !aggressiveAllowed) return false;
@@ -233,7 +227,7 @@ bool RuntimeConfig::applyParameter(
             } else return false;
             break;
         case ParameterGroup::ArmGeometry:
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
             if (index == 0 && length == 16) {
                 candidate.arm.firstLinkMm = readU16(data);
                 candidate.arm.secondLinkMm = readU16(data + 2);

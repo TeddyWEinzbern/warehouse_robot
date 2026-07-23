@@ -32,12 +32,6 @@ jobs:
       - run: pio test -e native
       - run: >-
           pio run
-          -e safe_idle
-          -e l293d_dev
-          -e l293d_dev_9600
-          -e uart_closed_loop_qualification
-          -e uart_closed_loop_robot
-          -e uart_closed_loop_qualification_9600
-          -e uart_closed_loop_robot_9600
-          -e uart_open_loop_calibration
-          -e arm_calibration
+          -e robot_closed_loop
+          -e robot_open_loop
+          -e calibration

@@ -29,6 +29,7 @@ requests. A clear request never implies arm.
 | Parameter set | `0x10` | group, index, expected revision, group data |
 | Calibration command | `0x11` | joint, raw degrees |
 | Parameter snapshot request | `0x12` | empty |
+| Drive calibration command | `0x13` | mode (`0` open-loop percent, `1` closed-loop mm/s), board channel, `i16` value, `u16` duration ms |
 | Hello / status telemetry | `0x80` / `0x81` | capability and safety state |
 | Drive command / feedback | `0x82` / `0x83` | physical target and measured speed domains |
 | Encoder totals / scheduler | `0x84` / `0x85` | independent freshness and deadline health |
@@ -38,6 +39,13 @@ requests. A clear request never implies arm.
 
 The golden host Control frame is tested in `tests/test_protocol.py` and the
 firmware parser uses the same version, CRC, COBS, and exact 16-byte payload.
+
+Drive calibration commands are accepted only by the `calibration` image while
+`DISARMED`: values are capped (±100 %, ±200 mm/s, ≤10 s), the frame repeats on
+the 50 ms keepalive slot, and expiry falls back to the `$Car:0,0,0,0!` zero
+frame. Profile enum slots 0–5 are retired (safe idle, L293D, qualification,
+open-loop calibration, arm-only calibration); the live profiles are
+`UartClosedLoopRobot` (3), `UartOpenLoopRobot` (6), and `Calibration` (7).
 
 ## Telemetry meanings
 
@@ -54,8 +62,9 @@ firmware parser uses the same version, CRC, COBS, and exact 16-byte payload.
   reply, regardless of conversion semantics.
 - `raw_increments` and encoder totals have independent validity and age.
 - `$Car:` mode sets PWM validity false. A speed target is never relabeled PWM.
-- L293D reports signed raw 8-bit PWM. `$Car_Pwm:` reports signed percent times
-  100. These are carried in the separate open-loop PWM message.
+- `$Car_Pwm:` reports signed percent times 100, carried in the separate
+  open-loop PWM message. (The retired L293D backend used signed raw 8-bit PWM;
+  its `pwm_unit` and profile enum slots remain reserved.)
 
 ## Runtime parameter groups
 
@@ -64,7 +73,7 @@ match, the robot must be `DISARMED`, and the complete candidate configuration
 must pass validation.
 
 1. Servo lower/upper limits, center offsets, and directions.
-2. Per-motor open-loop PWM minimum/maximum and directions.
+2. Reserved (was per-motor open-loop PWM for the retired L293D backend).
 3. Chassis speed and final wheel ceilings.
 4. Direction-specific acceleration/deceleration and zero-crossing settings.
 5. Encoder geometry, feedback channel/sign map, command channel/sign map, and
@@ -74,7 +83,7 @@ must pass validation.
 8. Low/normal/aggressive response selection.
 9. Per-channel `$Car_Pwm:` minimum/maximum percentages and signs.
 10. Arm link/workspace geometry and clearance/preset/stow positions. This group
-    is accepted and snapshotted only by the dedicated `arm_calibration` image;
+    is accepted and snapshotted only by the dedicated `calibration` image;
     validated values are promoted to compiled defaults before enabling the arm.
 
 Command timeout, encoder stale timeout, scheduler fault thresholds, and

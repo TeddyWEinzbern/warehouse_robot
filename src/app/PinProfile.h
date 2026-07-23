@@ -8,21 +8,11 @@ namespace pins {
 constexpr uint8_t BluetoothRx = A5;
 constexpr uint8_t BluetoothTx = A4;
 
-#if defined(ROBOT_BACKEND_L293D)
-constexpr uint8_t ServoBase = A0;
-constexpr uint8_t ServoShoulder = A1;
-constexpr uint8_t ServoElbow = A2;
-constexpr uint8_t ServoGripper = A3;
-constexpr uint8_t SonarTrigger[] = {2};
-constexpr uint8_t SonarEcho[] = {9, 10, 13};
-constexpr uint8_t SonarDirection[] = {0, 1, 2};
-constexpr uint8_t SonarSlot[] = {0, 0, 0};
-constexpr uint8_t SonarGroup[] = {0, 0, 0};
-#elif defined(ROBOT_BACKEND_UART)
+#if defined(ROBOT_BACKEND_UART)
 constexpr uint8_t ServoBase = 3;
 constexpr uint8_t ServoShoulder = 5;
 constexpr uint8_t ServoElbow = 6;
-constexpr uint8_t ServoGripper = 9;
+constexpr uint8_t ServoGripper = 9; 
 // Each 60 ms slot fires one front/left/right group. The second trigger requires
 // the documented D13 wiring change before sonar is enabled on UART profiles.
 constexpr uint8_t SonarTrigger[] = {2, 13};

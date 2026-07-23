@@ -17,6 +17,7 @@ enum class MessageType : uint8_t {
     ParameterSet = 0x10,
     CalibrationCommand = 0x11,
     ParameterSnapshotRequest = 0x12,
+    DriveCalibrationCommand = 0x13,
     HelloTelemetry = 0x80,
     StatusTelemetry = 0x81,
     DriveCommandTelemetry = 0x82,
@@ -55,6 +56,15 @@ struct PendingCalibration {
     uint8_t sequence;
 };
 
+struct PendingDriveCalibration {
+    bool valid;
+    uint8_t mode; // 0 = open-loop percent, 1 = closed-loop mm/s
+    uint8_t channel; // motor board channel 0..3
+    int16_t value;
+    uint16_t durationMs;
+    uint8_t sequence;
+};
+
 class CommunicationSubsystem {
   public:
     CommunicationSubsystem();
@@ -63,6 +73,7 @@ class CommunicationSubsystem {
     ControlRequests takeRequests();
     bool takeParameter(PendingParameter &parameter);
     bool takeCalibration(PendingCalibration &calibration);
+    bool takeDriveCalibration(PendingDriveCalibration &calibration);
     bool takeSnapshotRequest(uint8_t &sequence);
     bool sendFrame(
         Stream &stream,
@@ -94,6 +105,7 @@ class CommunicationSubsystem {
     ControlRequests requests_;
     PendingParameter parameter_;
     PendingCalibration calibration_;
+    PendingDriveCalibration driveCalibration_;
     uint16_t previousButtons_;
     uint16_t rxOverflows_;
     uint16_t malformedFrames_;

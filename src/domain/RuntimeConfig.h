@@ -8,7 +8,7 @@ namespace robot {
 
 enum class ParameterGroup : uint8_t {
     Servo = 1,
-    OpenLoopMotor = 2,
+    // 2 was OpenLoopMotor for the retired L293D backend; keep the slot free.
     ChassisSpeed = 3,
     ChassisAcceleration = 4,
     Encoder = 5,
@@ -80,7 +80,6 @@ struct ArmGeometry {
 
 struct RuntimeConfig {
     ServoCalibration servos[4];
-    MotorCalibration motors[4];
     MotorCalibration uartOpenLoop[4];
     ResponseProfileDefinition responseProfiles[3];
     EncoderCalibration encoder;
