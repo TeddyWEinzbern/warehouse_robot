@@ -101,20 +101,20 @@ constexpr float CalibrationDegreesPerSecond = 60.0F;
 // base offset = yaw - 90, shoulder offset = upper-arm angle from vertical,
 // elbow offset = forearm angle from horizontal (absolute, four-bar drive).
 constexpr uint8_t BaseZeroDegrees = 90;
-constexpr uint8_t ShoulderZeroDegrees = 90;
-constexpr uint8_t ElbowZeroDegrees = 90;
+constexpr uint8_t ShoulderZeroDegrees = 95;
+constexpr uint8_t ElbowZeroDegrees = 95;
 constexpr uint8_t GripperOpenDegrees = 80;
 constexpr uint8_t GripperClosedDegrees = 25;
 
 // Per-joint servo calibration measured with docs/arm-calibration.md.
 // Joint order: 0 base, 1 shoulder, 2 elbow, 3 gripper. The `calibrate`
 // REPL's `export` command prints this whole block ready to paste.
-constexpr uint8_t ServoLowerDegrees[4] = {0, 0, 0, 0};
-constexpr uint8_t ServoUpperDegrees[4] = {180, 180, 180, 180};
+constexpr uint8_t ServoLowerDegrees[4] = {1, 40, 40, 5};
+constexpr uint8_t ServoUpperDegrees[4] = {179, 180, 140, 175};
 constexpr uint8_t ServoCenterDegrees[4] = {
     BaseZeroDegrees, ShoulderZeroDegrees, ElbowZeroDegrees, GripperOpenDegrees
 };
-constexpr int8_t ServoDirectionSign[4] = {1, 1, 1, 1};
+constexpr int8_t ServoDirectionSign[4] = {1, -1, 1, 1};
 
 constexpr uint16_t NormalDriveLimitPermille = 1000;
 constexpr uint16_t CargoDriveLimitPermille = 450;
