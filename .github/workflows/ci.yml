@@ -33,7 +33,5 @@ jobs:
       - run: >-
           pio run
           -e robot_closed_loop
-          -e robot_closed_loop_9600
           -e robot_open_loop
-          -e robot_open_loop_9600
           -e calibration

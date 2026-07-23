@@ -13,7 +13,7 @@ tool (`warehouse-robot calibrate`). Together they calibrate the arm servos
 Print this or keep it open. Do the chapters in order; tick as you go.
 
 - [ ] 0.1 Wheels raised off the ground, servo/motor power available
-- [ ] 0.2 Host link connected to A4/A5 (Bluetooth module or USB-TTL adapter)
+- [ ] 0.2 Host link connected to A4/A5 (HC-05 or USB-TTL adapter)
 - [ ] 1.1 Calibration firmware flashed (`pio run -t upload -e calibration`)
 - [ ] 1.2 Session connected (`warehouse-robot calibrate --port ...`)
 - [ ] 2.1 Arm neutral positions marked (j0/j1/j2 center, j3 open+closed)
@@ -63,11 +63,12 @@ Rules:
   then reconnect them.
 - Put the robot on a stand so **all four wheels spin freely in the air**.
   Chapter 3 spins motors for real.
-- The default host-link baud is 38400. If your Bluetooth module only does
-  9600: open `platformio.ini`, find `[env:calibration]`, and add
-  `-DROBOT_HOST_BAUD=9600UL` as a new line at the end of its `build_flags`
-  (a ready-to-copy commented line sits right below the section). Then use
-  `--baud 9600` in step 1.2.
+- The HC-05 must be in normal data mode and slave role. The default host-link
+  baud is 38400. If its data mode is configured for 9600, open
+  `platformio.ini`, find `[uno]`, and uncomment the one shared
+  `-DROBOT_HOST_BAUD=9600UL` line. Then use `--baud 9600` in step 1.2.
+  The 38400 baud commonly used for full HC-05 AT-command mode does not prove
+  that normal data mode is also set to 38400.
 
 ## Chapter 1 — Flash and connect
 
@@ -314,9 +315,8 @@ Open `platformio.ini`, find `[env:robot_closed_loop]`, and change two lines:
 ```
 
 (Set only the one you actually completed; the arm stays parked without its
-flag, ARM stays locked without the drive flag. `robot_closed_loop_9600`
-inherits these lines automatically. If you use the open-loop fallback, make
-the same change in `[env:robot_open_loop]`.)
+flag, ARM stays locked without the drive flag. If you use the open-loop
+fallback, make the same change in `[env:robot_open_loop]`.)
 
 Flash it (D0/D1 unplugged, then reconnected):
 
@@ -340,7 +340,7 @@ send ClearFault before ARMing again.
 | `counts` never shows telemetry | Motor board D0/D1 wires disconnected or board unpowered |
 | Arm goes limp / robot resets when you plug USB | Expected: USB opening resets the Uno. Do the whole session over the A4/A5 link; USB is only for flashing |
 | `serial device ... is not available` | Wrong port name; rerun `warehouse-robot list-ports` — macOS needs the full `/dev/` path |
-| Nothing responds at all | Host-link baud mismatch: firmware default is 38400; a 9600 module needs the `platformio.ini` line **and** `--baud 9600` |
+| Nothing responds at all | Host-link baud mismatch: firmware default is 38400; an HC-05 set to 9600 data mode needs the shared `[uno]` flag uncommented **and** `--baud 9600` |
 | A joint jumps hard on its first command | First command per joint is never slewed; make it `90` and hold the arm |
 | Closed-loop `v` speed far from commanded | Wrong `enc` sign/channel or wrong `geom` numbers; redo 3.2/3.3 |
 

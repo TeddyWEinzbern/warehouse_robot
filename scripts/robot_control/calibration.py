@@ -4,8 +4,8 @@ Keeps one serial connection open for the whole session, jogs arm joints with
 absolute or incremental commands, spins individual drive motors open-loop or
 closed-loop while DISARMED, mirrors firmware telemetry, and exports a
 paste-ready calibration block for src/app/BuildConfig.h. The host link is
-the A4/A5 SoftwareSerial (Bluetooth module or USB-TTL adapter); the hardware
-UART belongs to the motor board.
+the A4/A5 SoftwareSerial (HC-05 or USB-TTL adapter); the hardware UART belongs
+to the motor board.
 """
 
 from __future__ import annotations

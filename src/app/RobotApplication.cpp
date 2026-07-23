@@ -52,7 +52,7 @@ RobotApplication::RobotApplication()
 Stream &RobotApplication::hostStream() {
     // The hardware UART (D0/D1) always belongs to the motor board; the host
     // link is the A4/A5 SoftwareSerial in every profile, calibration
-    // included (Bluetooth module or USB-TTL adapter).
+    // included (HC-05 or USB-TTL adapter).
     return bluetooth_;
 }
 

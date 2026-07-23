@@ -12,7 +12,7 @@ constexpr uint8_t BluetoothTx = A4;
 constexpr uint8_t ServoBase = 3;
 constexpr uint8_t ServoShoulder = 5;
 constexpr uint8_t ServoElbow = 6;
-constexpr uint8_t ServoGripper = 9;
+constexpr uint8_t ServoGripper = 9; 
 // Each 60 ms slot fires one front/left/right group. The second trigger requires
 // the documented D13 wiring change before sonar is enabled on UART profiles.
 constexpr uint8_t SonarTrigger[] = {2, 13};
