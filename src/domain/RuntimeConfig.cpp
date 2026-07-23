@@ -21,18 +21,15 @@ RuntimeConfig RuntimeConfig::defaults() {
             config::ServoDirectionSign[index]
         };
         result.uartOpenLoop[index] = {0, 100, 1};
-        result.encoder.channelMap[index] = static_cast<int8_t>(index);
-        result.encoder.commandMap[index] = static_cast<int8_t>(index);
-        result.encoder.commandSigns[index] = 1;
+        result.encoder.channelMap[index] = config::EncoderChannelMap[index];
+        result.encoder.signs[index] = config::EncoderDirectionSign[index];
+        result.encoder.commandMap[index] = config::MotorCommandMap[index];
+        result.encoder.commandSigns[index] = config::MotorCommandSign[index];
     }
-    result.encoder.signs[0] = -1;
-    result.encoder.signs[1] = 1;
-    result.encoder.signs[2] = -1;
-    result.encoder.signs[3] = 1;
-    result.encoder.wheelDiameterMm = 60;
-    result.encoder.countsPerRevolution = 4680;
-    result.encoder.wheelTrackMm = 160;
-    result.encoder.wheelbaseMm = 170;
+    result.encoder.wheelDiameterMm = config::WheelDiameterMm;
+    result.encoder.countsPerRevolution = config::EncoderCountsPerRevolution;
+    result.encoder.wheelTrackMm = config::WheelTrackMm;
+    result.encoder.wheelbaseMm = config::WheelbaseMm;
     result.encoder.semantics = EncoderSampleSemantics::ProvisionalFixed20Ms;
     result.chassis.maximumForwardMmS = 1000;
     result.chassis.maximumReverseMmS = 1000;
@@ -57,11 +54,7 @@ RuntimeConfig RuntimeConfig::defaults() {
         static_cast<uint16_t>(config::StowReachMm),
         static_cast<uint16_t>(config::StowHeightMm)
     };
-#if ROBOT_DRIVE_QUALIFICATION
-    result.chassis.activeProfile = ResponseProfile::Low;
-#else
     result.chassis.activeProfile = ResponseProfile::Normal;
-#endif
     result.responseProfiles[0] = {500, 500, 500};
     result.responseProfiles[1] = {1000, 1000, 1000};
     result.responseProfiles[2] = {1000, 1500, 1250};
@@ -130,7 +123,7 @@ bool RuntimeConfig::validate() const {
         a.zeroCrossingHoldMs > 500 ||
         chassis.translationZeroThresholdMmS > 100 ||
         chassis.rotationZeroThresholdMradS > 200) return false;
-#if ROBOT_ARM_CALIBRATION || ROBOT_ARM_CALIBRATED
+#if ROBOT_CALIBRATION || ROBOT_ARM_CALIBRATED
     if (arm.firstLinkMm < 20 || arm.firstLinkMm > 300 ||
         arm.secondLinkMm < 20 || arm.secondLinkMm > 300 ||
         arm.shoulderBaseHeightMm > 500 || arm.gripperLengthOffsetMm > 200 ||
@@ -224,9 +217,6 @@ bool RuntimeConfig::applyParameter(
         case ParameterGroup::ResponseProfile:
             if (index == 0 && length == 1 &&
                 data[0] <= static_cast<uint8_t>(ResponseProfile::Aggressive)) {
-#if ROBOT_DRIVE_QUALIFICATION
-                if (data[0] != static_cast<uint8_t>(ResponseProfile::Low)) return false;
-#endif
                 candidate.chassis.activeProfile = static_cast<ResponseProfile>(data[0]);
                 if (candidate.chassis.activeProfile == ResponseProfile::Aggressive &&
                     !aggressiveAllowed) return false;
@@ -237,7 +227,7 @@ bool RuntimeConfig::applyParameter(
             } else return false;
             break;
         case ParameterGroup::ArmGeometry:
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
             if (index == 0 && length == 16) {
                 candidate.arm.firstLinkMm = readU16(data);
                 candidate.arm.secondLinkMm = readU16(data + 2);

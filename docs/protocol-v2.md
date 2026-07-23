@@ -29,6 +29,7 @@ requests. A clear request never implies arm.
 | Parameter set | `0x10` | group, index, expected revision, group data |
 | Calibration command | `0x11` | joint, raw degrees |
 | Parameter snapshot request | `0x12` | empty |
+| Drive calibration command | `0x13` | mode (`0` open-loop percent, `1` closed-loop mm/s), board channel, `i16` value, `u16` duration ms |
 | Hello / status telemetry | `0x80` / `0x81` | capability and safety state |
 | Drive command / feedback | `0x82` / `0x83` | physical target and measured speed domains |
 | Encoder totals / scheduler | `0x84` / `0x85` | independent freshness and deadline health |
@@ -38,6 +39,13 @@ requests. A clear request never implies arm.
 
 The golden host Control frame is tested in `tests/test_protocol.py` and the
 firmware parser uses the same version, CRC, COBS, and exact 16-byte payload.
+
+Drive calibration commands are accepted only by the `calibration` image while
+`DISARMED`: values are capped (±100 %, ±200 mm/s, ≤10 s), the frame repeats on
+the 50 ms keepalive slot, and expiry falls back to the `$Car:0,0,0,0!` zero
+frame. Profile enum slots 0–5 are retired (safe idle, L293D, qualification,
+open-loop calibration, arm-only calibration); the live profiles are
+`UartClosedLoopRobot` (3), `UartOpenLoopRobot` (6), and `Calibration` (7).
 
 ## Telemetry meanings
 
@@ -75,7 +83,7 @@ must pass validation.
 8. Low/normal/aggressive response selection.
 9. Per-channel `$Car_Pwm:` minimum/maximum percentages and signs.
 10. Arm link/workspace geometry and clearance/preset/stow positions. This group
-    is accepted and snapshotted only by the dedicated `arm_calibration` image;
+    is accepted and snapshotted only by the dedicated `calibration` image;
     validated values are promoted to compiled defaults before enabling the arm.
 
 Command timeout, encoder stale timeout, scheduler fault thresholds, and

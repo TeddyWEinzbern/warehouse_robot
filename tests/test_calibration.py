@@ -199,6 +199,90 @@ class FirmwareSyncTests(unittest.TestCase):
         self.assertTrue(any("nothing to sync" in line for line in output))
 
 
+def encoder_totals(increments, totals) -> bytes:
+    payload = struct.pack("<4h", *increments)
+    payload += struct.pack("<4i", *totals)
+    payload += bytes([0x0F]) + struct.pack("<H", 20)
+    return encode_message(MessageType.ENCODER_TOTALS_TELEMETRY, 11, payload)
+
+
+class MotorCommandTests(unittest.TestCase):
+    def test_open_loop_spin_sends_drive_calibration_frame(self):
+        link = FakeLink()
+        link.queue_reply(ack())
+        session, output = make_session(link)
+        session.handle_line("m0 30 2")
+        sent = ProtocolDecoder().feed(b"".join(link.written))
+        frames = [
+            message.payload for message in sent
+            if message.message_type == MessageType.DRIVE_CALIBRATION_COMMAND
+        ]
+        self.assertEqual(frames, [struct.pack("<BBhH", 0, 0, 30, 2000)])
+        self.assertIn("spinning", output[-1])
+
+    def test_closed_loop_spin_uses_mode_one_and_default_duration(self):
+        link = FakeLink()
+        link.queue_reply(ack())
+        session, _ = make_session(link)
+        session.handle_line("v2 -150")
+        sent = ProtocolDecoder().feed(b"".join(link.written))
+        self.assertEqual(
+            sent[-1].payload, struct.pack("<BBhH", 1, 2, -150, 2000)
+        )
+
+    def test_spin_values_beyond_limits_are_rejected_locally(self):
+        link = FakeLink()
+        session, output = make_session(link)
+        session.handle_line("m1 130 2")
+        session.handle_line("v1 300 2")
+        session.handle_line("m1 50 15")
+        self.assertEqual(link.written, [])
+        self.assertTrue(all(line.startswith("error:") for line in output))
+
+    def test_stop_sends_zero_spin(self):
+        link = FakeLink()
+        link.queue_reply(ack())
+        session, output = make_session(link)
+        session.handle_line("stop")
+        sent = ProtocolDecoder().feed(b"".join(link.written))
+        self.assertEqual(sent[-1].payload, struct.pack("<BBhH", 0, 0, 0, 0))
+        self.assertIn("stopped", output[-1])
+
+    def test_counts_shows_encoder_telemetry(self):
+        link = FakeLink()
+        session, output = make_session(link)
+        link._pending += encoder_totals((5, -6, 7, -8), (100, -200, 300, -400))
+        session.handle_line("counts")
+        self.assertIn("-200", output[-1])
+        self.assertIn("7", output[-1])
+
+
+class DriveExportTests(unittest.TestCase):
+    def test_motor_and_encoder_records_shape_the_export_block(self):
+        link = FakeLink()
+        session, _ = make_session(link)
+        for command in (
+            "motor 0 fr fwd", "motor 1 fl rev", "motor 2 rr fwd",
+            "motor 3 rl fwd",
+            "enc 0 fr rev", "enc 1 fl fwd", "enc 2 rr fwd", "enc 3 rl fwd",
+            "geom 65 4680 160 170",
+        ):
+            session.handle_line(command)
+        block = session.export_block()
+        self.assertIn("MotorCommandMap[4] = {1, 0, 3, 2};", block)
+        self.assertIn("MotorCommandSign[4] = {-1, 1, 1, 1};", block)
+        self.assertIn("EncoderChannelMap[4] = {1, 0, 3, 2};", block)
+        self.assertIn("EncoderDirectionSign[4] = {1, -1, 1, 1};", block)
+        self.assertIn("constexpr uint16_t WheelDiameterMm = 65;", block)
+
+    def test_missing_motor_records_warn_in_export(self):
+        link = FakeLink()
+        session, _ = make_session(link)
+        block = session.export_block()
+        self.assertIn("motor record missing for the front-left wheel", block)
+        self.assertIn("geometry not recorded", block)
+
+
 class ExportTests(unittest.TestCase):
     def test_export_produces_paste_block_with_marked_values(self):
         link = FakeLink()

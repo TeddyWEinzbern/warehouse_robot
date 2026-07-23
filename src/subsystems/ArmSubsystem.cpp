@@ -474,7 +474,7 @@ const uint8_t *ArmSubsystem::lastCommandedDegrees() const {
 }
 bool ArmSubsystem::cargoMayBeHeld() const { return cargoMayBeHeld_; }
 bool ArmSubsystem::calibrated() const {
-    return config::ArmCalibrated || ROBOT_ARM_CALIBRATION;
+    return config::ArmCalibrated || ROBOT_CALIBRATION;
 }
 bool ArmSubsystem::faulted() const { return faulted_; }
 bool ArmSubsystem::targetLimited() const { return targetLimitedTicks_ > 0; }

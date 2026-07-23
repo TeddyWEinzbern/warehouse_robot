@@ -6,13 +6,10 @@ import argparse
 from contextlib import closing
 import os
 from pathlib import Path
-import struct
 import sys
-import time
 
 from .config import CONTROL
 from .input import monitor, open_joystick
-from .protocol import MessageType, ProtocolDecoder, encode_message
 from .runtime import RobotRuntime
 from .transport import SerialConnectionError, list_ports, open_port
 
@@ -92,45 +89,19 @@ def parse_args() -> argparse.Namespace:
     inspect = subcommands.add_parser("monitor", help="Display raw gamepad inputs")
     inspect.add_argument("--joystick", type=int, default=CONTROL.joystick_index)
 
-    calibrate = subcommands.add_parser(
-        "calibrate-joint", help="Send one typed command to arm_calibration firmware"
-    )
-    calibrate.add_argument("--port", required=True)
-    calibrate.add_argument("--joint", type=int, choices=range(4), required=True)
-    calibrate.add_argument("--angle", type=int, choices=range(181), required=True)
-
     session = subcommands.add_parser(
         "calibrate",
-        help="Interactive arm calibration session (keeps the port open)",
+        help="Interactive arm+motor calibration session (keeps the port open)",
     )
     session.add_argument("--port", required=True)
+    session.add_argument(
+        "--baud",
+        type=int,
+        choices=(9600, 38400),
+        default=38400,
+        help="Host-link baud; must match ROBOT_HOST_BAUD of the calibration build",
+    )
     return parser.parse_args()
-
-
-def calibrate_joint(device: str, joint: int, angle: int) -> int:
-    decoder = ProtocolDecoder()
-    with open_port(device, 115200) as link:
-        time.sleep(2.0)
-        link.write(encode_message(MessageType.DISARM, 0))
-        time.sleep(0.1)
-        link.write(
-            encode_message(
-                MessageType.CALIBRATION_COMMAND, 1, struct.pack("<BB", joint, angle)
-            )
-        )
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            waiting = int(link.in_waiting)
-            for message in decoder.feed(link.read(waiting) if waiting else b""):
-                if message.message_type == MessageType.ACK:
-                    print(f"Joint {joint} commanded to {angle} degrees")
-                    return 0
-                if message.message_type == MessageType.NACK:
-                    raise SerialConnectionError(
-                        f"firmware rejected calibration command (reason {message.payload[1]})"
-                    )
-            time.sleep(0.01)
-    raise SerialConnectionError("timed out waiting for calibration acknowledgement")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -141,14 +112,11 @@ def run(args: argparse.Namespace) -> int:
         pygame, joystick = open_joystick(args.joystick)
         monitor(pygame, joystick, 10.0)
         return 0
-    if args.command == "calibrate-joint":
-        validate_serial_device(args.port)
-        return calibrate_joint(args.port, args.joint, args.angle)
     if args.command == "calibrate":
         from .calibration import run_session
 
         validate_serial_device(args.port)
-        with open_port(args.port, 115200) as link:
+        with open_port(args.port, args.baud) as link:
             return run_session(link)
     if args.reconnect_attempts < 1 or not 1 <= args.web_port <= 65535:
         raise SystemExit("Reconnect attempts and web port must be positive")

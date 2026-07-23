@@ -50,47 +50,34 @@ RobotApplication::RobotApplication()
       previousState_(RobotState::Boot) {}
 
 Stream &RobotApplication::hostStream() {
-#if ROBOT_ARM_CALIBRATION
-    return Serial;
-#else
+    // The hardware UART (D0/D1) always belongs to the motor board; the host
+    // link is the A4/A5 SoftwareSerial in every profile, calibration
+    // included (Bluetooth module or USB-TTL adapter).
     return bluetooth_;
-#endif
 }
 
 RobotProfile RobotApplication::profile() const {
-#if ROBOT_SAFE_IDLE
-    return RobotProfile::SafeIdle;
-#elif ROBOT_ARM_CALIBRATION
-    return RobotProfile::ArmCalibration;
+#if ROBOT_CALIBRATION
+    return RobotProfile::Calibration;
 #elif defined(ROBOT_UART_OPEN_LOOP)
-    return RobotProfile::UartOpenLoopCalibration;
-#elif ROBOT_DRIVE_QUALIFICATION
-    return RobotProfile::UartClosedLoopQualification;
+    return RobotProfile::UartOpenLoopRobot;
 #else
     return RobotProfile::UartClosedLoopRobot;
 #endif
 }
 
 bool RobotApplication::profileCanArm() const {
-#if ROBOT_SAFE_IDLE || ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
     return false;
-#elif defined(ROBOT_UART_CLOSED_LOOP) && !ROBOT_DRIVE_QUALIFICATION
-    return config::DriveCalibrationQualified;
 #else
-    return true;
+    return config::DriveCalibrated;
 #endif
 }
 
-bool RobotApplication::sonarEnabled() const {
-#if ROBOT_SAFE_IDLE || ROBOT_ARM_CALIBRATION || ROBOT_DRIVE_QUALIFICATION
-    return false;
-#else
-    return true;
-#endif
-}
+bool RobotApplication::sonarEnabled() const { return true; }
 
 bool RobotApplication::armMotionEnabled() const {
-#if ROBOT_SAFE_IDLE || ROBOT_DRIVE_QUALIFICATION
+#if ROBOT_CALIBRATION
     return false;
 #else
     return arm_.calibrated();
@@ -98,11 +85,7 @@ bool RobotApplication::armMotionEnabled() const {
 }
 
 void RobotApplication::begin() {
-#if ROBOT_ARM_CALIBRATION
-    Serial.begin(config::UsbBaud);
-#else
     bluetooth_.begin(config::BluetoothBaud);
-#endif
     chassis_.begin(runtime_);
     arm_.begin(runtime_);
     if (sonarEnabled()) sensors_.begin();
@@ -146,7 +129,7 @@ void RobotApplication::processHostMessages(
             );
         } else if (!runtime_.applyParameter(
                        parameter.group, parameter.index, parameter.data,
-                       parameter.length, config::DriveCalibrationQualified
+                       parameter.length, config::DriveCalibrated
                    )) {
             communication_.sendNack(
                 hostStream(), parameter.sequence, MessageType::ParameterSet,
@@ -162,7 +145,7 @@ void RobotApplication::processHostMessages(
 
     PendingCalibration calibration = {};
     if (communication_.transmitIdle() && communication_.takeCalibration(calibration)) {
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
         if (safety_.state() != RobotState::Disarmed || calibration.joint >= 4 ||
             calibration.degrees > 180) {
             communication_.sendNack(
@@ -190,16 +173,67 @@ void RobotApplication::processHostMessages(
         );
 #endif
     }
+
+    PendingDriveCalibration spin = {};
+    if (communication_.transmitIdle() && communication_.takeDriveCalibration(spin)) {
+#if ROBOT_CALIBRATION
+        const int16_t magnitude = spin.value < 0
+            ? static_cast<int16_t>(-spin.value) : spin.value;
+        const int16_t limit = spin.mode == 0
+            ? config::CalibrationSpinLimitPercent
+            : config::CalibrationWheelLimitMmS;
+        if (safety_.state() != RobotState::Disarmed) {
+            communication_.sendNack(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, NackReason::InvalidState
+            );
+        } else if (spin.mode > 1 || spin.channel > 3 || magnitude > limit ||
+                   spin.durationMs > config::CalibrationSpinMaxDurationMs) {
+            communication_.sendNack(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, NackReason::ValidationFailed
+            );
+        } else if (!driveBackend_.startCalibrationSpin(
+                       spin.mode, spin.channel, spin.value, spin.durationMs,
+                       millis()
+                   )) {
+            // Motor board not initialized yet (still settling or faulted).
+            communication_.sendNack(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, NackReason::InvalidState
+            );
+        } else {
+            communication_.sendAck(
+                hostStream(), spin.sequence,
+                MessageType::DriveCalibrationCommand, runtime_.revision
+            );
+        }
+#else
+        communication_.sendNack(
+            hostStream(), spin.sequence,
+            MessageType::DriveCalibrationCommand, NackReason::InvalidState
+        );
+#endif
+    }
 }
 
 void RobotApplication::enforceSafetyStop(uint32_t nowMs) {
     if (!safety_.takeImmediateStop()) return;
     chassis_.forceZero(nowMs);
+#if !ROBOT_CALIBRATION
     assist_.cancel();
+#endif
     arm_.holdLastCommanded();
 }
 
 void RobotApplication::updateMotionIntent(uint32_t nowMs) {
+#if ROBOT_CALIBRATION
+    // The calibration profile can never arm: motors only move through the
+    // DISARMED calibration spin path and the backend's zero keepalive, so
+    // the whole motion-intent pipeline (assist, presets, chassis ramp) is
+    // compiled out to keep the image inside flash.
+    (void)nowMs;
+#else
     const bool motionAllowed = safety_.armed();
     if (!motionAllowed) {
         assist_.cancel();
@@ -209,10 +243,6 @@ void RobotApplication::updateMotionIntent(uint32_t nowMs) {
         return;
     }
 
-#if !ROBOT_ARM_CALIBRATION
-    // The calibration profile can never arm, so the planner below is
-    // unreachable there; compiling it out lets the linker drop the whole
-    // task-space pipeline from that image.
     arm_.requestPreset(activeFrame_.pressed, runtime_);
     assistOutput_ = assist_.update(
         activeFrame_, sensors_.snapshot(), arm_.currentTarget(),
@@ -249,7 +279,9 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
             elapsedUs = config::MaxMotionDtUs;
             saturatingIncrement(motionDtClamps_);
         }
+#if !ROBOT_CALIBRATION
         if (safety_.armed()) chassis_.trajectoryTick(nowUs, elapsedUs, runtime_);
+#endif
         if (safety_.armed() && chassisTask_.stats().consecutiveMisses >= 3)
             safety_.latchFault(FaultSchedulerOverrun);
         enforceSafetyStop(nowMs);
@@ -264,7 +296,9 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
         if (safety_.armed() && consecutiveMotorLate_ >= 2)
             safety_.latchFault(FaultSchedulerOverrun);
         enforceSafetyStop(nowMs);
+#if !ROBOT_CALIBRATION
         if (safety_.armed()) chassis_.motorTick(nowMs, true, runtime_);
+#endif
     }
 
     if (encoderTask_.due(nowUs))
@@ -276,7 +310,7 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
             elapsedUs = config::MaxMotionDtUs;
             saturatingIncrement(motionDtClamps_);
         }
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
         arm_.calibrationTick(elapsedUs, runtime_);
 #else
         if (safety_.armed() && armMotionEnabled())
@@ -357,7 +391,7 @@ void RobotApplication::update() {
         previousState_ = safety_.state();
     }
     const bool hostTransmitWindow =
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
         true;
 #else
         activeFrame_.valid && nowMs - activeFrame_.receivedAtMs <=
@@ -382,9 +416,9 @@ void RobotApplication::sendHello() {
         static_cast<uint8_t>(capabilities.mode),
         static_cast<uint8_t>(capabilities.pwmUnit),
         static_cast<uint8_t>(
-            (config::DriveCalibrationQualified ? 1U : 0U) |
+            (config::DriveCalibrated ? 1U : 0U) |
             (arm_.calibrated() ? 2U : 0U) |
-            (ROBOT_DRIVE_QUALIFICATION ? 4U : 0U) |
+            (ROBOT_CALIBRATION ? 4U : 0U) |
             (capabilities.encoderFeedback ? 8U : 0U)
         ),
         static_cast<uint8_t>(runtime_.revision),
@@ -410,7 +444,7 @@ void RobotApplication::sendStatus(uint32_t nowMs) {
     status_.cargoMayBeHeld = arm_.cargoMayBeHeld();
     status_.linkAlive = safety_.linkAlive();
     status_.emergencyStopped = safety_.emergencyStopped();
-    status_.driveCalibrationQualified = config::DriveCalibrationQualified;
+    status_.driveCalibrated = config::DriveCalibrated;
     uint8_t payload[14];
     uint8_t offset = 0;
     payload[offset++] = static_cast<uint8_t>(status_.state);
@@ -422,7 +456,7 @@ void RobotApplication::sendStatus(uint32_t nowMs) {
         (status_.linkAlive ? 1U : 0U) |
         (status_.emergencyStopped ? 2U : 0U) |
         (status_.cargoMayBeHeld ? 4U : 0U) |
-        (status_.driveCalibrationQualified ? 8U : 0U)
+        (status_.driveCalibrated ? 8U : 0U)
     );
     payload[offset++] = static_cast<uint8_t>(runtime_.chassis.activeProfile);
     putU16(payload, offset, runtime_.revision);
@@ -679,7 +713,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
             data[length++] = static_cast<uint8_t>(values[i]);
             data[length++] = static_cast<uint8_t>(values[i] >> 8);
         }
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
     } else {
         group = ParameterGroup::ArmGeometry;
         index = snapshotCursor_ - 25;
@@ -717,7 +751,7 @@ bool RobotApplication::sendNextParameterSnapshot() {
         payload, offset
     );
     if (++snapshotCursor_ >=
-#if ROBOT_ARM_CALIBRATION
+#if ROBOT_CALIBRATION
             27
 #else
             25
@@ -742,16 +776,25 @@ void RobotApplication::sendTelemetry(uint32_t nowMs) {
         // Parameter snapshots use detail slots so status remains live.
     } else {
         switch ((telemetryDetailSlot_ / 2U) % 6U) {
+#if ROBOT_CALIBRATION
+            // Chassis intent and open-loop PWM mirrors are meaningless while
+            // the profile cannot arm; their slots repeat the status frame.
+            case 0: sendStatus(nowMs); break;
+#else
             case 0: sendDriveCommand(nowMs); break;
+#endif
             case 1: sendDriveFeedback(nowMs); break;
             case 2: sendEncoderTotals(nowMs); break;
             case 3: sendScheduler(); break;
             case 4: sendSensorArm(nowMs); break;
             default:
-                if (driveBackend_.capabilities().pwmUnit == PwmUnit::Unavailable)
-                    sendStatus(nowMs);
-                else
+#if !ROBOT_CALIBRATION
+                if (driveBackend_.capabilities().pwmUnit != PwmUnit::Unavailable) {
                     sendOpenLoopPwm();
+                    break;
+                }
+#endif
+                sendStatus(nowMs);
                 break;
         }
     }

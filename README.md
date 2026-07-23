@@ -1,8 +1,9 @@
 # Warehouse Robot Control System
 
 Safety-oriented Arduino Uno firmware and a Python host console for a four-wheel
-mecanum warehouse robot. Select the build profile explicitly when changing
-hardware backends; `safe_idle` remains the no-actuator bring-up profile.
+mecanum warehouse robot. Two production profiles (closed-loop and open-loop
+drive, each with a 9600-baud variant) plus one combined servo+motor
+`calibration` profile.
 
 The UART drivetrain uses the motor board's own closed-loop speed controller:
 
@@ -13,9 +14,9 @@ The UART drivetrain uses the motor board's own closed-loop speed controller:
   wheel-speed PID or PI loop.
 
 The wheel order, signs, dimensions, counts/revolution, `$Car:` scaling, and
-`Encoder_20ms` timing semantics are deliberately marked provisional. The
-normal UART profile refuses to arm while
-`ROBOT_DRIVE_CALIBRATION_QUALIFIED=0`.
+`Encoder_20ms` timing semantics are measured with
+[docs/calibration.md](docs/calibration.md). The robot profiles refuse to arm
+while `ROBOT_DRIVE_CALIBRATED=0`.
 
 ## Runtime structure
 
@@ -36,29 +37,26 @@ behavior, and missed-deadline counters. A scheduler overrun while armed is a
 latched fault. Disarm, link timeout, E-stop, and critical faults bypass all
 ramps and request the exact `$Car:0,0,0,0!` frame immediately.
 
-More detail is in [protocol-v2.md](docs/protocol-v2.md) and
-[raised-wheel-qualification.md](docs/raised-wheel-qualification.md).
+More detail is in [protocol-v2.md](docs/protocol-v2.md).
 
 ## Build profiles
 
 ```sh
-# No motor backend and no servo attachment
-pio run -e safe_idle
+# Combined servo + motor calibration (default env; drives nothing on its own)
+pio run -e calibration
 
-# Raised-wheel UART qualification, capped at 200 mm/s
-pio run -e uart_closed_loop_qualification
+# Production closed-loop drive; refuses ARM until ROBOT_DRIVE_CALIBRATED=1
+pio run -e robot_closed_loop
 
-# Normal profile; builds but refuses ARM until qualification is promoted
-pio run -e uart_closed_loop_robot
-
-# Dedicated calibration profiles
-pio run -e uart_open_loop_calibration
-pio run -e arm_calibration
+# Open-loop fallback (commands map to PWM percent)
+pio run -e robot_open_loop
 ```
 
-Arm servo calibration (interactive `warehouse-robot calibrate` session and the
-BuildConfig write-back) is documented step by step in
-[docs/arm-calibration.md](docs/arm-calibration.md).
+The full calibration procedure — arm servos, motor/encoder mapping, wheel
+geometry, raised-wheel closed-loop verification, and the BuildConfig
+write-back — is one checklist in [docs/calibration.md](docs/calibration.md).
+Sonar wiring and scaling from 0 to 6 sensors is in
+[docs/sensors.md](docs/sensors.md).
 
 The standard firmware profiles use 38400 baud, but the HC-05 data-mode baud must
 match the configured module. The 9600-baud compatibility profiles reduce
@@ -66,9 +64,12 @@ firmware telemetry to 5 Hz and require the host's 9600-baud mode, which reduces
 its control stream to 10 Hz. The Arduino's 20 ms motor schedule is unchanged:
 
 ```sh
-pio run -e uart_closed_loop_qualification_9600
-pio run -e uart_closed_loop_robot_9600
+pio run -e robot_closed_loop_9600
+pio run -e robot_open_loop_9600
 ```
+
+(For a 9600-baud calibration session, add `-DROBOT_HOST_BAUD=9600UL` to
+`[env:calibration]` as documented inside `platformio.ini`.)
 
 ## Python telemetry and tuning console
 
@@ -121,15 +122,14 @@ Runtime parameter commits are revisioned, atomic, validated against compiled
 hard ceilings, and accepted only in `DISARMED`. They reset on firmware restart.
 Validated values can then be reviewed and copied into source defaults.
 Arm geometry/workspace commits are intentionally available only in the
-`arm_calibration` profile so their parsing and validation code is absent from
+`calibration` profile so their parsing and validation code is absent from
 the flash-constrained normal drivetrain image.
 
-The explicit arm calibration command is typed protocol v2, not a production
-ASCII bypass:
+The interactive calibration session (typed protocol v2, not an ASCII bypass)
+runs over the A4/A5 host link:
 
 ```sh
-warehouse-robot calibrate-joint \
-  --port /dev/cu.usbmodemXXXX --joint 0 --angle 90
+warehouse-robot calibrate --port /dev/cu.HC-05
 ```
 
 ## UART robot wiring
@@ -146,11 +146,12 @@ warehouse-robot calibrate-joint \
 | Group 1 front / left / right echo | D7 / D10 / D12 |
 
 All modules require a common ground. Motors and servos require suitable
-external power. A physical motor-power cutoff remains mandatory for hardware
-qualification. Disconnect the D0/D1 motor-board link during Uno upload.
+external power. A physical motor-power cutoff remains mandatory for the
+raised-wheel verification in docs/calibration.md chapter 3. Disconnect the
+D0/D1 motor-board link during Uno upload.
 
 The D13 second-trigger wiring and HC-05 baud selection remain hardware approval
-gates. Sonar and arm motion are disabled by the qualification profile.
+gates; see [docs/sensors.md](docs/sensors.md) for sonar scaling.
 
 ## Verification
 
@@ -158,14 +159,13 @@ gates. Sonar and arm motion are disabled by the qualification profile.
 PYTHONPATH=scripts python3 -m unittest discover -s tests -v
 python3 -m compileall -q scripts tests
 pio test -e native
-pio run -e safe_idle \
-  -e uart_closed_loop_qualification -e uart_closed_loop_robot \
-  -e uart_closed_loop_qualification_9600 -e uart_closed_loop_robot_9600 \
-  -e uart_open_loop_calibration -e arm_calibration
+pio run -e robot_closed_loop -e robot_closed_loop_9600 \
+  -e robot_open_loop -e robot_open_loop_9600 -e calibration
 ```
 
 These checks verify software behavior and Uno resource limits. They do not
-replace the raised-wheel, E-stop, wiring, encoder, or 30-minute jitter tests.
+replace the raised-wheel verification (docs/calibration.md chapter 3),
+E-stop, wiring, or 30-minute jitter tests.
 
 ## Legacy/debug isolation
 

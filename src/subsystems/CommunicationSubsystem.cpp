@@ -28,6 +28,7 @@ bool validAxis(int16_t value) { return value >= -1000 && value <= 1000; }
 
 CommunicationSubsystem::CommunicationSubsystem()
     : latest_({}), requests_({0}), parameter_({}), calibration_({}),
+      driveCalibration_({}),
       previousButtons_(0), rxOverflows_(0), malformedFrames_(0),
       snapshotSequence_(0), encodedLength_(0), transmit_{},
       transmitLength_(0), transmitOffset_(0), txDrops_(0),
@@ -183,6 +184,15 @@ void CommunicationSubsystem::finishFrame(uint32_t nowMs) {
             if (payloadLength != 2 || calibration_.valid) { markMalformed(); return; }
             calibration_ = {true, payload[0], payload[1], sequence};
             break;
+        case MessageType::DriveCalibrationCommand:
+            if (payloadLength != 6 || driveCalibration_.valid) { markMalformed(); return; }
+            driveCalibration_.valid = true;
+            driveCalibration_.mode = payload[0];
+            driveCalibration_.channel = payload[1];
+            driveCalibration_.value = readI16(payload + 2);
+            driveCalibration_.durationMs = readU16(payload + 4);
+            driveCalibration_.sequence = sequence;
+            break;
         case MessageType::ParameterSnapshotRequest:
             if (payloadLength != 0) { markMalformed(); return; }
             snapshotRequested_ = true;
@@ -275,6 +285,13 @@ bool CommunicationSubsystem::takeCalibration(PendingCalibration &calibration) {
     if (!calibration_.valid) return false;
     calibration = calibration_;
     calibration_.valid = false;
+    return true;
+}
+
+bool CommunicationSubsystem::takeDriveCalibration(PendingDriveCalibration &calibration) {
+    if (!driveCalibration_.valid) return false;
+    calibration = driveCalibration_;
+    driveCalibration_.valid = false;
     return true;
 }
 

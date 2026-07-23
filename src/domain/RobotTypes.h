@@ -24,12 +24,17 @@ enum RequestFlag : uint8_t {
 
 enum class RobotState : uint8_t { Boot, Disarmed, Armed, EStop, Fault };
 enum class RobotProfile : uint8_t {
+    // Slots 0-2 and 4-5 belong to retired profiles (safe idle, L293D,
+    // qualification, open-loop calibration, arm-only calibration); they are
+    // kept so the wire values of the surviving profiles never change.
     SafeIdle,
-    L293DDevelopment, // retired backend; slot kept for host protocol stability
+    L293DDevelopment,
     UartClosedLoopQualification,
     UartClosedLoopRobot,
     UartOpenLoopCalibration,
     ArmCalibration,
+    UartOpenLoopRobot,
+    Calibration,
 };
 enum class DriveControlMode : uint8_t {
     None,
@@ -196,7 +201,7 @@ struct RobotStatus {
     bool cargoMayBeHeld;
     bool linkAlive;
     bool emergencyStopped;
-    bool driveCalibrationQualified;
+    bool driveCalibrated;
 };
 
 } // namespace robot

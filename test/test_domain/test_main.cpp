@@ -1,5 +1,6 @@
 #include <unity.h>
 
+#include "app/BuildConfig.h"
 #include "core/MotorBoardProtocol.h"
 #include "core/Scheduler.h"
 #include "domain/ArmKinematics.h"
@@ -169,7 +170,9 @@ void test_runtime_parameter_commit_is_atomic() {
         ParameterGroup::Servo, 0, invalidServo, sizeof(invalidServo), false
     ));
     TEST_ASSERT_EQUAL_UINT16(revision, runtime.revision);
-    TEST_ASSERT_EQUAL_UINT8(0, runtime.servos[0].lowerDegrees);
+    TEST_ASSERT_EQUAL_UINT8(
+        robot::config::ServoLowerDegrees[0], runtime.servos[0].lowerDegrees
+    );
     const uint8_t lowProfile = 0;
     TEST_ASSERT_TRUE(runtime.applyParameter(
         ParameterGroup::ResponseProfile, 0, &lowProfile, 1, false

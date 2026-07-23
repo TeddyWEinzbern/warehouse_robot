@@ -22,6 +22,7 @@ class MessageType(IntEnum):
     PARAMETER_SET = 0x10
     CALIBRATION_COMMAND = 0x11
     PARAMETER_SNAPSHOT_REQUEST = 0x12
+    DRIVE_CALIBRATION_COMMAND = 0x13
     HELLO_TELEMETRY = 0x80
     STATUS_TELEMETRY = 0x81
     DRIVE_COMMAND_TELEMETRY = 0x82
@@ -448,6 +449,20 @@ def telemetry_to_dict(message: Message) -> dict[str, Any]:
     if t == MessageType.NACK and len(p) == 2:
         return {"kind": "nack", "rejected_type": p[0], "reason": p[1]}
     return {"kind": "unknown", "message_type": int(t), "payload": list(p)}
+
+
+def encode_drive_calibration(
+    sequence: int, mode: int, channel: int, value: int, duration_ms: int
+) -> bytes:
+    """Calibration-profile motor spin: mode 0 = open-loop percent, 1 = closed-loop mm/s."""
+    payload = struct.pack(
+        "<BBhH",
+        _validated_int(mode, 0, 1, "mode"),
+        _validated_int(channel, 0, 3, "channel"),
+        _validated_int(value, -1000, 1000, "value"),
+        _validated_int(duration_ms, 0, 65535, "duration_ms"),
+    )
+    return encode_message(MessageType.DRIVE_CALIBRATION_COMMAND, sequence, payload)
 
 
 def encode_simple(message_type: MessageType, sequence: int) -> bytes:

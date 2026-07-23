@@ -1,9 +1,11 @@
-"""Interactive serial calibration session for the arm_calibration firmware.
+"""Interactive serial calibration session for the `calibration` firmware.
 
-Keeps one serial connection open for the whole session (opening the USB port
-resets the Uno, so one-shot commands would re-detach the servos every time),
-jogs joints with absolute or incremental commands, mirrors firmware telemetry,
-and exports a paste-ready calibration block for src/app/BuildConfig.h.
+Keeps one serial connection open for the whole session, jogs arm joints with
+absolute or incremental commands, spins individual drive motors open-loop or
+closed-loop while DISARMED, mirrors firmware telemetry, and exports a
+paste-ready calibration block for src/app/BuildConfig.h. The host link is
+the A4/A5 SoftwareSerial (Bluetooth module or USB-TTL adapter); the hardware
+UART belongs to the motor board.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from .protocol import (
     ParameterGroup,
     ProtocolDecoder,
     build_parameter_data,
+    encode_drive_calibration,
     encode_message,
     encode_parameter_set,
     telemetry_to_dict,
@@ -24,17 +27,24 @@ from .protocol import (
 
 JOINT_NAMES = ("base", "shoulder", "elbow", "gripper")
 JOINT_COUNT = 4
+WHEEL_NAMES = ("fl", "fr", "rl", "rr")
+WHEEL_LABELS = ("front-left", "front-right", "rear-left", "rear-right")
 ACK_TIMEOUT_S = 3.0
+SPIN_MAX_PERCENT = 100
+SPIN_MAX_MM_S = 200
+SPIN_MAX_SECONDS = 10.0
 
 NACK_REASONS = {
     1: "malformed frame",
     2: "unsupported command",
-    3: "invalid state: firmware must be the arm_calibration build and DISARMED",
+    3: "invalid state: firmware must be the `calibration` build, DISARMED,"
+       " and (for motor spins) the motor board must be connected and powered",
     4: "parameter revision mismatch",
-    5: "blocked by the shoulder/elbow coupling guard (four-bar fold band)",
+    5: "blocked: shoulder/elbow coupling guard, or spin value/duration"
+       " outside the calibration limits",
 }
 
-HELP_TEXT = """commands:
+HELP_TEXT = """arm commands:
   j<n> <angle>     move joint n (0 base, 1 shoulder, 2 elbow, 3 gripper)
                    to an absolute servo angle 0-180, e.g. `j2 95`
   j<n> +<d>|-<d>   nudge joint n by d degrees, e.g. `j1 +2`
@@ -44,7 +54,23 @@ HELP_TEXT = """commands:
   sync             push recorded center+dir to the firmware so its
                    coupling guard uses the real geometry (runs
                    automatically once a joint has both)
-  s                show commanded angles, telemetry, marks, fold estimate
+motor commands (wheels raised off the ground!):
+  m<n> <pct> [sec]  spin motor board channel n (0-3) open-loop, e.g.
+                    `m0 30 2` = channel 0, 30% forward, 2 s; negative
+                    percent reverses; seconds default 2, max 10
+  v<n> <mm_s> [sec] closed-loop spin, e.g. `v0 150 3` (max 200 mm/s);
+                    use after `motor`/`enc` mappings are measured
+  stop              stop any running spin immediately
+  counts            show encoder increments/totals and measured speeds
+  motor <n> <wheel> <fwd|rev>  record which wheel board channel n drives
+                    and whether positive spins it forward; wheel is one
+                    of fl fr rl rr, e.g. `motor 0 fl fwd`
+  enc <n> <wheel> <fwd|rev>    record which wheel encoder channel n
+                    counts for, and whether it counts up going forward
+  geom <wheel_mm> <counts_per_rev> <track_mm> <wheelbase_mm>
+                    record measured wheel geometry, e.g. `geom 60 4680 160 170`
+session commands:
+  s                show joint state, motor mappings, marks, fold estimate
   export           print the BuildConfig.h block from the recorded marks
   help             show this text
   q                quit (servos keep holding their last position)"""
@@ -60,6 +86,34 @@ def _parse_joint(token: str) -> int:
     if len(token) == 2 and token[0] == "j" and token[1] in "0123":
         return int(token[1])
     raise CalibrationError(f"unknown joint {token!r}; expected j0..j3")
+
+
+def _parse_channel(token: str) -> int:
+    if token in ("0", "1", "2", "3"):
+        return int(token)
+    raise CalibrationError(f"unknown channel {token!r}; expected 0..3")
+
+
+def _parse_wheel(token: str) -> int:
+    if token in WHEEL_NAMES:
+        return WHEEL_NAMES.index(token)
+    raise CalibrationError(
+        f"unknown wheel {token!r}; expected one of {' '.join(WHEEL_NAMES)}"
+    )
+
+
+def _parse_seconds(tokens: list[str]) -> float:
+    if not tokens:
+        return 2.0
+    try:
+        seconds = float(tokens[0])
+    except ValueError:
+        raise CalibrationError(f"bad duration {tokens[0]!r}") from None
+    if not 0 < seconds <= SPIN_MAX_SECONDS:
+        raise CalibrationError(
+            f"duration must be within 0-{SPIN_MAX_SECONDS:.0f} seconds"
+        )
+    return seconds
 
 
 class CalibrationSession:
@@ -85,6 +139,13 @@ class CalibrationSession:
         self.directions: dict[int, int] = {}
         self.revision: int | None = None
         self.synced: dict[int, int] = {}
+        # Motor calibration records: board/encoder channel -> (wheel, sign).
+        self.motor_map: dict[int, tuple[int, int]] = {}
+        self.encoder_map: dict[int, tuple[int, int]] = {}
+        self.geometry: tuple[int, int, int, int] | None = None
+        self.increments: list[int] | None = None
+        self.totals: list[int] | None = None
+        self.measured_mm_s: list[int] | None = None
 
     # -- transport helpers --------------------------------------------------
 
@@ -113,6 +174,15 @@ class CalibrationSession:
                 decoded = telemetry_to_dict(message)
                 if decoded and decoded.get("kind") == "status":
                     self.revision = decoded["revision"]
+            elif message.message_type == MessageType.ENCODER_TOTALS_TELEMETRY:
+                decoded = telemetry_to_dict(message)
+                if decoded and decoded.get("kind") == "encoder_totals":
+                    self.increments = list(decoded["raw_increments"])
+                    self.totals = list(decoded["totals"])
+            elif message.message_type == MessageType.DRIVE_FEEDBACK_TELEMETRY:
+                decoded = telemetry_to_dict(message)
+                if decoded and decoded.get("kind") == "drive_feedback":
+                    self.measured_mm_s = list(decoded["measured_speeds"])
             elif (
                 message.message_type == MessageType.ACK
                 and len(message.payload) >= 3
@@ -255,6 +325,21 @@ class CalibrationSession:
                 self._sync_all()
             elif tokens[0] == "export":
                 self.out(self.export_block())
+            elif tokens[0] == "stop":
+                self._spin(mode=0, channel=0, value=0, seconds=0.0)
+                self.out("spin stopped (zero frame resumes immediately)")
+            elif tokens[0] == "counts":
+                self._show_counts()
+            elif tokens[0] == "motor":
+                self._handle_motor_record(tokens)
+            elif tokens[0] == "enc":
+                self._handle_encoder_record(tokens)
+            elif tokens[0] == "geom":
+                self._handle_geometry(tokens)
+            elif tokens[0].startswith("m") and tokens[0][1:].isdigit():
+                self._handle_spin(tokens, closed_loop=False)
+            elif tokens[0].startswith("v") and tokens[0][1:].isdigit():
+                self._handle_spin(tokens, closed_loop=True)
             elif tokens[0].startswith("j"):
                 self._handle_move(tokens)
             else:
@@ -313,6 +398,114 @@ class CalibrationSession:
         self.out(f"j{joint} direction = {self.directions[joint]:+d}")
         self._sync_joint(joint)
 
+    # -- motor calibration ----------------------------------------------------
+
+    def _spin(self, *, mode: int, channel: int, value: int, seconds: float) -> None:
+        self._send_raw(
+            encode_drive_calibration(
+                self._next_sequence(), mode, channel, value,
+                int(round(seconds * 1000.0)),
+            )
+        )
+        self._await_reply()
+
+    def _send_raw(self, packet: bytes) -> None:
+        self.link.write(packet)
+
+    def _handle_spin(self, tokens: list[str], *, closed_loop: bool) -> None:
+        unit = "mm/s" if closed_loop else "%"
+        limit = SPIN_MAX_MM_S if closed_loop else SPIN_MAX_PERCENT
+        usage = (
+            f"expected `{tokens[0][0]}<channel> <value> [seconds]`, e.g. "
+            + ("`v0 150 3`" if closed_loop else "`m0 30 2`")
+        )
+        if len(tokens) not in (2, 3):
+            raise CalibrationError(usage)
+        channel = _parse_channel(tokens[0][1:])
+        try:
+            value = int(tokens[1])
+        except ValueError:
+            raise CalibrationError(f"bad value {tokens[1]!r}; {usage}") from None
+        if not -limit <= value <= limit:
+            raise CalibrationError(f"value must be within +/-{limit} {unit}")
+        seconds = _parse_seconds(tokens[2:])
+        self._spin(
+            mode=1 if closed_loop else 0, channel=channel,
+            value=value, seconds=seconds,
+        )
+        self.out(
+            f"channel {channel} spinning at {value} {unit} for {seconds:g} s"
+            " (repeats every 50 ms, stops by itself; `stop` to end early)"
+        )
+
+    def _handle_motor_record(self, tokens: list[str]) -> None:
+        if len(tokens) != 4 or tokens[3] not in ("fwd", "rev"):
+            raise CalibrationError("expected `motor <channel> <fl|fr|rl|rr> <fwd|rev>`")
+        channel = _parse_channel(tokens[1])
+        wheel = _parse_wheel(tokens[2])
+        sign = 1 if tokens[3] == "fwd" else -1
+        self.motor_map[channel] = (wheel, sign)
+        self.out(
+            f"recorded: board channel {channel} drives the"
+            f" {WHEEL_LABELS[wheel]} wheel, positive = "
+            + ("forward" if sign == 1 else "backward")
+        )
+
+    def _handle_encoder_record(self, tokens: list[str]) -> None:
+        if len(tokens) != 4 or tokens[3] not in ("fwd", "rev"):
+            raise CalibrationError("expected `enc <channel> <fl|fr|rl|rr> <fwd|rev>`")
+        channel = _parse_channel(tokens[1])
+        wheel = _parse_wheel(tokens[2])
+        sign = 1 if tokens[3] == "fwd" else -1
+        self.encoder_map[channel] = (wheel, sign)
+        self.out(
+            f"recorded: encoder channel {channel} counts for the"
+            f" {WHEEL_LABELS[wheel]} wheel, "
+            + ("counts up" if sign == 1 else "counts down")
+            + " when the wheel turns forward"
+        )
+
+    def _handle_geometry(self, tokens: list[str]) -> None:
+        if len(tokens) != 5:
+            raise CalibrationError(
+                "expected `geom <wheel_mm> <counts_per_rev> <track_mm> <wheelbase_mm>`"
+            )
+        try:
+            values = tuple(int(token) for token in tokens[1:5])
+        except ValueError:
+            raise CalibrationError("geometry values must be whole numbers") from None
+        bounds = ((1, 300), (1, 60000), (1, 1000), (1, 1000))
+        names = ("wheel_mm", "counts_per_rev", "track_mm", "wheelbase_mm")
+        for value, (low, high), name in zip(values, bounds, names):
+            if not low <= value <= high:
+                raise CalibrationError(f"{name} must be within {low}-{high}")
+        self.geometry = values
+        self.out(
+            "recorded geometry: wheel {0} mm, {1} counts/rev,"
+            " track {2} mm, wheelbase {3} mm".format(*values)
+        )
+
+    def _show_counts(self) -> None:
+        self._pump()
+        if self.increments is None and self.measured_mm_s is None:
+            self.out(
+                "no encoder telemetry yet; wait a second and retry"
+                " (the motor board must be connected and powered)"
+            )
+            return
+        lines = ["channel    increment      total   measured mm/s"]
+        for channel in range(4):
+            increment = self.increments[channel] if self.increments else None
+            total = self.totals[channel] if self.totals else None
+            speed = self.measured_mm_s[channel] if self.measured_mm_s else None
+            lines.append(
+                f"{channel:>7}"
+                f" {'-' if increment is None else increment:>12}"
+                f" {'-' if total is None else total:>10}"
+                f" {'-' if speed is None else speed:>15}"
+            )
+        self.out("\n".join(lines))
+
     def _show_status(self) -> None:
         self._pump()
         lines = ["joint      commanded  telemetry  dir  marks"]
@@ -338,6 +531,24 @@ class CalibrationSession:
         lines.append(
             f"firmware sync: {synced or 'none'}"
             " (unsynced joints leave the guard on default direction/center)"
+        )
+        motor = ", ".join(
+            f"ch{channel}->{WHEEL_NAMES[wheel]}{'+' if sign == 1 else '-'}"
+            for channel, (wheel, sign) in sorted(self.motor_map.items())
+        )
+        encoder = ", ".join(
+            f"ch{channel}->{WHEEL_NAMES[wheel]}{'+' if sign == 1 else '-'}"
+            for channel, (wheel, sign) in sorted(self.encoder_map.items())
+        )
+        lines.append(f"motor map: {motor or 'none recorded'}")
+        lines.append(f"encoder map: {encoder or 'none recorded'}")
+        lines.append(
+            "geometry: "
+            + (
+                "wheel {0} mm, {1} counts/rev, track {2} mm, wheelbase {3} mm"
+                .format(*self.geometry)
+                if self.geometry else "not recorded"
+            )
         )
         self.out("\n".join(lines))
 
@@ -384,6 +595,8 @@ class CalibrationSession:
                 f"base travel is {base_span} deg; the mechanism requires >= 180"
             )
 
+        drive_lines = self._drive_export_lines(warnings)
+
         block = "\n".join(
             [
                 "// Paste over the matching lines in src/app/BuildConfig.h",
@@ -398,6 +611,8 @@ class CalibrationSession:
                 + ", ".join(str(value) for value in uppers) + "};",
                 "constexpr int8_t ServoDirectionSign[4] = {"
                 + ", ".join(str(value) for value in signs) + "};",
+                "",
+                *drive_lines,
             ]
         )
         if warnings:
@@ -405,6 +620,52 @@ class CalibrationSession:
                 f"//   {warning}" for warning in warnings
             )
         return block
+
+    def _drive_export_lines(self, warnings: list[str]) -> list[str]:
+        """BuildConfig.h drive block from the motor/enc/geom records."""
+        command_map = [index for index in range(4)]
+        command_sign = [1] * 4
+        channel_map = [index for index in range(4)]
+        encoder_sign = [1] * 4
+        for label, records, target_map, target_sign in (
+            ("motor", self.motor_map, command_map, command_sign),
+            ("enc", self.encoder_map, channel_map, encoder_sign),
+        ):
+            seen_wheels = [wheel for wheel, _ in records.values()]
+            for wheel in range(4):
+                count = seen_wheels.count(wheel)
+                if count == 0:
+                    warnings.append(
+                        f"{label} record missing for the {WHEEL_LABELS[wheel]}"
+                        f" wheel; using default channel {wheel}"
+                    )
+                elif count > 1:
+                    warnings.append(
+                        f"{label} records name the {WHEEL_LABELS[wheel]} wheel"
+                        f" {count} times; re-measure"
+                    )
+            for channel, (wheel, sign) in records.items():
+                target_map[wheel] = channel
+                target_sign[wheel] = sign
+        if self.geometry is None:
+            warnings.append("geometry not recorded (`geom ...`); using defaults")
+            geometry = (60, 4680, 160, 170)
+        else:
+            geometry = self.geometry
+        return [
+            "constexpr int8_t MotorCommandMap[4] = {"
+            + ", ".join(str(value) for value in command_map) + "};",
+            "constexpr int8_t MotorCommandSign[4] = {"
+            + ", ".join(str(value) for value in command_sign) + "};",
+            "constexpr int8_t EncoderChannelMap[4] = {"
+            + ", ".join(str(value) for value in channel_map) + "};",
+            "constexpr int8_t EncoderDirectionSign[4] = {"
+            + ", ".join(str(value) for value in encoder_sign) + "};",
+            f"constexpr uint16_t WheelDiameterMm = {geometry[0]};",
+            f"constexpr uint16_t EncoderCountsPerRevolution = {geometry[1]};",
+            f"constexpr uint16_t WheelTrackMm = {geometry[2]};",
+            f"constexpr uint16_t WheelbaseMm = {geometry[3]};",
+        ]
 
 
 def run_session(link: Any, *, out: Callable[[str], None] = print) -> int:

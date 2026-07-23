@@ -135,10 +135,7 @@ void ChassisSubsystem::trajectoryTick(uint32_t nowUs, uint32_t elapsedUs, const 
                  config::HardMaxRotationalAccelerationMradS2),
         runtime.chassis.rotationZeroThresholdMradS, base.zeroCrossingHoldMs, nowUs, elapsedUs
     );
-    uint16_t wheelLimit = runtime.chassis.maximumWheelMmS;
-#if ROBOT_DRIVE_QUALIFICATION
-    if (wheelLimit > config::QualificationWheelLimitMmS) wheelLimit = config::QualificationWheelLimitMmS;
-#endif
+    const uint16_t wheelLimit = runtime.chassis.maximumWheelMmS;
     wheels_ = MecanumKinematics::mix(
         ramped_, runtime.encoder.wheelTrackMm, runtime.encoder.wheelbaseMm, wheelLimit
     );
