@@ -2,31 +2,29 @@
 
 #include <Arduino.h>
 
-#include "domain/RuntimeConfig.h"
+#include "app/BuildConfig.h"
 #include "domain/RobotTypes.h"
 
 namespace robot {
 
+constexpr uint8_t ProtocolVersion = 3;
+
 enum class MessageType : uint8_t {
     Hello = 0x01,
-    Control = 0x02,
     Arm = 0x03,
     Disarm = 0x04,
     ClearEStop = 0x05,
     ClearFault = 0x06,
-    ParameterSet = 0x10,
-    CalibrationCommand = 0x11,
-    ParameterSnapshotRequest = 0x12,
-    DriveCalibrationCommand = 0x13,
-    HelloTelemetry = 0x80,
-    StatusTelemetry = 0x81,
-    DriveCommandTelemetry = 0x82,
-    DriveFeedbackTelemetry = 0x83,
-    EncoderTotalsTelemetry = 0x84,
-    SchedulerTelemetry = 0x85,
-    SensorArmTelemetry = 0x86,
-    OpenLoopPwmTelemetry = 0x87,
-    ParameterSnapshot = 0x90,
+    CalibrationArmMove = 0x10,
+    CalibrationSetJointReference = 0x11,
+    CalibrationDriveSpin = 0x12,
+    CalibrationReadDrive = 0x13,
+    CalibrationReadSensor = 0x14,
+    CalibrationReadArm = 0x15,
+    CalibrationReadSystem = 0x16,
+    HelloResponse = 0x80,
+    CriticalStatus = 0x81,
+    CalibrationReport = 0x90,
     Ack = 0x91,
     Nack = 0x92,
 };
@@ -35,33 +33,47 @@ enum class NackReason : uint8_t {
     Malformed = 1,
     Unsupported = 2,
     InvalidState = 3,
-    RevisionMismatch = 4,
-    ValidationFailed = 5,
+    ValidationFailed = 4,
 };
 
-struct PendingParameter {
-    bool valid;
-    ParameterGroup group;
-    uint8_t index;
-    uint16_t expectedRevision;
-    uint8_t data[23];
-    uint8_t length;
-    uint8_t sequence;
+enum class CalibrationReportKind : uint8_t {
+    Arm = 1,
+    DriveCounts = 2,
+    DriveSpeed = 3,
+    Sensor = 4,
+    System = 5,
 };
 
-struct PendingCalibration {
+struct PendingArmMove {
     bool valid;
     uint8_t joint;
     uint8_t degrees;
     uint8_t sequence;
 };
 
+struct PendingJointReference {
+    bool valid;
+    uint8_t joint;
+    uint8_t lowerDegrees;
+    uint8_t upperDegrees;
+    int8_t centerOffsetDegrees;
+    int8_t direction;
+    uint8_t sequence;
+};
+
 struct PendingDriveCalibration {
     bool valid;
-    uint8_t mode; // 0 = open-loop percent, 1 = closed-loop mm/s
-    uint8_t channel; // motor board channel 0..3
+    uint8_t mode;
+    uint8_t channel;
     int16_t value;
     uint16_t durationMs;
+    uint8_t sequence;
+};
+
+struct PendingCalibrationRead {
+    bool valid;
+    MessageType type;
+    uint8_t page;
     uint8_t sequence;
 };
 
@@ -71,61 +83,64 @@ class CommunicationSubsystem {
     void poll(Stream &stream, uint32_t nowMs);
     const OperatorControlFrame &latest() const;
     ControlRequests takeRequests();
-    bool takeParameter(PendingParameter &parameter);
-    bool takeCalibration(PendingCalibration &calibration);
-    bool takeDriveCalibration(PendingDriveCalibration &calibration);
-    bool takeSnapshotRequest(uint8_t &sequence);
+    bool takeArmMove(PendingArmMove &command);
+    bool takeJointReference(PendingJointReference &command);
+    bool takeDriveCalibration(PendingDriveCalibration &command);
+    bool takeCalibrationRead(PendingCalibrationRead &request);
     bool sendFrame(
-        Stream &stream,
         MessageType type,
         uint8_t sequence,
         const uint8_t *payload,
         uint8_t payloadLength
     );
-    bool sendAck(
-        Stream &stream,
-        uint8_t sequence,
-        MessageType acknowledged,
-        uint16_t revision
-    );
+    bool sendAck(uint8_t sequence, MessageType acknowledged);
     bool sendNack(
-        Stream &stream,
         uint8_t sequence,
         MessageType rejected,
         NackReason reason
     );
     void pumpTransmit(Stream &stream, uint8_t byteBudget);
     bool transmitIdle() const;
-    uint16_t txDrops() const;
-    uint16_t rxOverflows() const;
-    uint16_t malformedFrames() const;
+    bool receiveIdle() const;
 
   private:
+    static constexpr uint8_t MaximumPayload =
+        ROBOT_CALIBRATION ? 27 : 8;
+    static constexpr uint8_t MaximumRaw = MaximumPayload + 5;
+    static constexpr uint8_t MaximumEncoded = MaximumRaw + 2;
+
     OperatorControlFrame latest_;
     ControlRequests requests_;
-    PendingParameter parameter_;
-    PendingCalibration calibration_;
+    PendingArmMove armMove_;
+    PendingJointReference jointReference_;
     PendingDriveCalibration driveCalibration_;
-    uint16_t previousButtons_;
-    uint16_t rxOverflows_;
-    uint16_t malformedFrames_;
-    uint8_t snapshotSequence_;
-    uint8_t encoded_[36];
+    PendingCalibrationRead calibrationRead_;
+    uint8_t previousButtons_;
+    uint8_t encoded_[MaximumEncoded];
+    uint8_t raw_[MaximumRaw];
+    uint8_t transmit_[MaximumEncoded];
     uint8_t encodedLength_;
-    uint8_t transmit_[34];
     uint8_t transmitLength_;
     uint8_t transmitOffset_;
-    uint16_t txDrops_;
-    bool snapshotRequested_;
-    void acceptFrame(OperatorControlFrame &frame, uint32_t nowMs);
+    bool discarding_;
+
+    void acceptControl(const uint8_t *raw, uint32_t nowMs);
     void finishFrame(uint32_t nowMs);
-    void markMalformed();
+    void acceptGeneric(uint8_t length);
+    static int16_t expandAxis(uint8_t value);
+    static int16_t expandTernary(uint8_t code);
     static uint8_t crc8(const uint8_t *data, uint8_t length);
     static uint8_t cobsDecode(
-        const uint8_t *input, uint8_t length, uint8_t *output, uint8_t capacity
+        const uint8_t *input,
+        uint8_t length,
+        uint8_t *output,
+        uint8_t capacity
     );
     static uint8_t cobsEncode(
-        const uint8_t *input, uint8_t length, uint8_t *output, uint8_t capacity
+        const uint8_t *input,
+        uint8_t length,
+        uint8_t *output,
+        uint8_t capacity
     );
 };
 

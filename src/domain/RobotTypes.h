@@ -13,38 +13,24 @@ enum Button : uint16_t {
     CancelAssist = 1U << 5,
 };
 
-enum ControlFlag : uint8_t { EStopAsserted = 1U << 0 };
 enum RequestFlag : uint8_t {
     RequestArm = 1U << 0,
     RequestDisarm = 1U << 1,
     RequestClearEStop = 1U << 2,
     RequestClearFault = 1U << 3,
     RequestHello = 1U << 4,
+    RequestEStop = 1U << 5,
 };
 
 enum class RobotState : uint8_t { Boot, Disarmed, Armed, EStop, Fault };
 enum class RobotProfile : uint8_t {
-    // Slots 0-2 and 4-5 belong to retired profiles (safe idle, L293D,
-    // qualification, open-loop calibration, arm-only calibration); they are
-    // kept so the wire values of the surviving profiles never change.
-    SafeIdle,
-    L293DDevelopment,
-    UartClosedLoopQualification,
-    UartClosedLoopRobot,
-    UartOpenLoopCalibration,
-    ArmCalibration,
-    UartOpenLoopRobot,
-    Calibration,
+    // Keep the established numeric identifiers without retaining retired
+    // profile implementations or names.
+    UartClosedLoopRobot = 3,
+    UartOpenLoopRobot = 6,
+    Calibration = 7,
 };
-enum class DriveControlMode : uint8_t {
-    None,
-    L293DOpenLoopPwm, // retired backend; slot kept for host protocol stability
-    UartOpenLoopPwm,
-    UartClosedLoopSpeed,
-};
-enum class PwmUnit : uint8_t { Unavailable, Raw8Bit, PercentX100 };
 enum class EncoderSampleSemantics : uint8_t { ProvisionalFixed20Ms, ElapsedBetweenSamples };
-enum class ResponseProfile : uint8_t { Low, Normal, Aggressive };
 enum class IntentSource : uint8_t { Operator, Assist, Safety };
 enum class AssistStage : uint8_t { Idle, Align, Range, Complete, Cancelled };
 enum class SensorDirection : uint8_t { Front = 0, Left = 1, Right = 2 };
@@ -65,10 +51,7 @@ enum FaultCode : uint16_t {
 enum WarningCode : uint16_t {
     WarningNone = 0,
     WarningDriveUnqualified = 1U << 0,
-    WarningEncoderSignCandidate = 1U << 1,
-    WarningEncoderScaleCandidate = 1U << 2,
-    WarningSensorStale = 1U << 3,
-    WarningArmTargetLimited = 1U << 4,
+    WarningArmTargetLimited = 1U << 1,
 };
 
 struct OperatorControlFrame {
@@ -81,7 +64,6 @@ struct OperatorControlFrame {
     int8_t gripper;
     uint16_t buttons;
     uint16_t pressed;
-    uint8_t controlFlags;
     uint8_t sequence;
     uint32_t receivedAtMs;
     bool valid;
@@ -143,31 +125,13 @@ struct DistancePair {
 
 struct SensorSnapshot { DistancePair directions[3]; };
 
-struct DriveCapabilities {
-    DriveControlMode mode;
-    PwmUnit pwmUnit;
-    bool encoderFeedback;
-    bool batteryFeedback;
-    bool internalPwmFeedback;
-};
-
 struct DriveFeedback {
-    int16_t controllerTargetMmS[4];
     int16_t rawIncrement[4];
     int32_t total[4];
     int16_t measuredMmS[4];
-    int16_t errorMmS[4];
-    int16_t openLoopPwm[4];
-    uint16_t batteryMv;
     uint32_t incrementUpdatedAtMs;
-    uint32_t totalUpdatedAtMs;
-    uint32_t batteryUpdatedAtMs;
-    uint16_t sampleIntervalMs;
     uint8_t encoderValidMask;
     uint8_t totalValidMask;
-    uint8_t errorValidMask;
-    bool batteryValid;
-    EncoderSampleSemantics semantics;
 };
 
 struct DriveHealth {
@@ -189,7 +153,6 @@ struct AssistOutput {
 struct SchedulerTaskStats {
     uint16_t missed;
     uint16_t consecutiveMisses;
-    uint32_t maxLatenessUs;
 };
 
 struct RobotStatus {

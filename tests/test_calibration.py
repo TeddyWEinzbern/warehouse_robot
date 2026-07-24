@@ -1,4 +1,4 @@
-"""Unit tests for the interactive calibration session."""
+"""Unit tests for the protocol-v3 interactive calibration session."""
 
 from __future__ import annotations
 
@@ -6,24 +6,49 @@ import struct
 import unittest
 
 from robot_control.calibration import CalibrationSession
-from robot_control.protocol import MessageType, ProtocolDecoder, encode_message
+from robot_control.protocol import (
+    CalibrationReportKind,
+    MessageType,
+    ProtocolDecoder,
+    decode_message,
+    encode_message,
+)
+
+
+MUTATING_CALIBRATION_TYPES = {
+    MessageType.CAL_ARM_MOVE,
+    MessageType.CAL_SET_JOINT_REFERENCE,
+    MessageType.CAL_DRIVE_SPIN,
+}
 
 
 class FakeLink:
-    """Serial stand-in that queues scripted firmware replies per write."""
+    """Serial stand-in with optional scripted replies and safe auto-ACKs."""
 
     def __init__(self) -> None:
         self.written: list[bytes] = []
         self.replies: list[bytes] = []
         self._pending = b""
+        self.flushed = False
+        self.baudrate = 9600
 
     def queue_reply(self, packet: bytes) -> None:
         self.replies.append(packet)
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes) -> int:
         self.written.append(data)
+        message = decode_message(data)
         if self.replies:
             self._pending += self.replies.pop(0)
+        elif message.message_type in MUTATING_CALIBRATION_TYPES:
+            self._pending += ack(message.message_type, message.sequence)
+        elif message.message_type == MessageType.HELLO:
+            self._pending += encode_message(
+                MessageType.HELLO_RESPONSE,
+                0,
+                bytes((7, 1, 1, 1, 2, 0, 0, 8)),
+            )
+        return len(data)
 
     @property
     def in_waiting(self) -> int:
@@ -33,13 +58,8 @@ class FakeLink:
         data, self._pending = self._pending[:count], self._pending[count:]
         return data
 
-
-def make_session(link: FakeLink) -> tuple[CalibrationSession, list[str]]:
-    output: list[str] = []
-    session = CalibrationSession(
-        link, out=output.append, clock=Clock(), sleep=lambda _: None
-    )
-    return session, output
+    def flush(self) -> None:
+        self.flushed = True
 
 
 class Clock:
@@ -51,184 +71,236 @@ class Clock:
         return self.now
 
 
-def ack(sequence: int = 1, revision: int = 0) -> bytes:
-    payload = bytes([0x11]) + revision.to_bytes(2, "little")
-    return encode_message(MessageType.ACK, sequence, payload)
+class ManualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
-def bare_ack(sequence: int = 1) -> bytes:
-    return encode_message(MessageType.ACK, sequence, bytes([0x11]))
+def make_session(link: FakeLink) -> tuple[CalibrationSession, list[str]]:
+    output: list[str] = []
+    session = CalibrationSession(
+        link, out=output.append, clock=Clock(), sleep=lambda _: None
+    )
+    return session, output
 
 
-def status(revision: int) -> bytes:
-    payload = bytes([1, 0]) + b"\x00" * 6 + bytes([0, 0])
-    payload += revision.to_bytes(2, "little") + b"\x00\x00"
-    return encode_message(MessageType.STATUS_TELEMETRY, 7, payload)
+def ack(message_type: MessageType, sequence: int) -> bytes:
+    return encode_message(MessageType.ACK, sequence, bytes((message_type,)))
 
 
-def nack(reason: int, sequence: int = 1) -> bytes:
-    return encode_message(MessageType.NACK, sequence, bytes([0x11, reason]))
+def nack(message_type: MessageType, reason: int, sequence: int) -> bytes:
+    return encode_message(
+        MessageType.NACK, sequence, bytes((message_type, reason))
+    )
 
 
-def sensor_arm(servos: tuple[int, int, int, int]) -> bytes:
-    payload = struct.pack("<6H", 0, 0, 0, 0, 0, 0) + bytes([0])
-    payload += bytes(servos) + bytes([1, 0]) + struct.pack("<H", 7400)
-    payload += bytes([1]) + struct.pack("<H", 10)
-    return encode_message(MessageType.SENSOR_ARM_TELEMETRY, 9, payload)
+def arm_report(sequence: int, servos=(90, 91, 92, 80)) -> bytes:
+    return encode_message(
+        MessageType.CAL_REPORT,
+        sequence,
+        bytes((CalibrationReportKind.ARM, *servos)),
+    )
 
 
-class MoveCommandTests(unittest.TestCase):
-    def test_absolute_move_sends_calibration_command_and_tracks_angle(self):
+def counts_report(sequence: int, increments, totals, valid_mask=0x0F) -> bytes:
+    payload = bytes((CalibrationReportKind.DRIVE_COUNTS,))
+    payload += struct.pack("<4h", *increments)
+    payload += struct.pack("<4i", *totals)
+    payload += bytes((valid_mask,))
+    return encode_message(MessageType.CAL_REPORT, sequence, payload)
+
+
+def speed_report(sequence: int, speeds, valid_mask=0x0F) -> bytes:
+    payload = bytes((CalibrationReportKind.DRIVE_SPEED,))
+    payload += struct.pack("<4h", *speeds)
+    payload += bytes((valid_mask,))
+    return encode_message(MessageType.CAL_REPORT, sequence, payload)
+
+
+def sensor_report(sequence: int, distances, valid_mask=0x3F) -> bytes:
+    payload = bytes((CalibrationReportKind.SENSOR,))
+    payload += struct.pack("<6H", *distances)
+    payload += bytes((valid_mask,))
+    return encode_message(MessageType.CAL_REPORT, sequence, payload)
+
+
+def system_report(sequence: int, minimum_stack_bytes: int) -> bytes:
+    payload = bytes((CalibrationReportKind.SYSTEM,))
+    payload += struct.pack("<H", minimum_stack_bytes)
+    return encode_message(MessageType.CAL_REPORT, sequence, payload)
+
+
+class MoveAndReferenceTests(unittest.TestCase):
+    def test_absolute_move_uses_calibration_only_command(self):
         link = FakeLink()
-        link.queue_reply(ack())
         session, output = make_session(link)
+        session.handle_line("j2 90")
         self.assertTrue(session.handle_line("j2 95"))
         self.assertEqual(session.commanded[2], 95)
+        message = decode_message(link.written[-1])
+        self.assertEqual(message.message_type, MessageType.CAL_ARM_MOVE)
+        self.assertEqual(message.payload, bytes((2, 95)))
         self.assertIn("elbow", output[0])
-        payload = link.written[-1]
-        self.assertIn(bytes([2, 95]), payload)
 
-    def test_incremental_move_requires_a_previous_absolute(self):
+    def test_incremental_move_requires_previous_absolute(self):
         link = FakeLink()
         session, output = make_session(link)
         session.handle_line("j1 +5")
         self.assertTrue(output[0].startswith("error:"))
         self.assertEqual(link.written, [])
 
-    def test_incremental_move_offsets_last_commanded(self):
-        link = FakeLink()
-        link.queue_reply(ack())
-        link.queue_reply(ack(2))
-        session, _ = make_session(link)
-        session.handle_line("j1 90")
-        session.handle_line("j1 -3")
-        self.assertEqual(session.commanded[1], 87)
-
-    def test_nack_is_translated_to_human_readable_reason(self):
-        link = FakeLink()
-        link.queue_reply(nack(5))
-        session, output = make_session(link)
-        session.handle_line("j2 170")
-        self.assertIn("coupling guard", output[0])
-        self.assertIsNone(session.commanded[2])
-
-    def test_out_of_range_angle_is_rejected_locally(self):
+    def test_first_joint_command_must_be_raw_ninety_anchor(self):
         link = FakeLink()
         session, output = make_session(link)
-        session.handle_line("j0 181")
-        self.assertTrue(output[0].startswith("error:"))
+        session.handle_line("j3 80")
         self.assertEqual(link.written, [])
+        self.assertIn("must be exactly 90", output[-1])
 
-
-class MarkAndStatusTests(unittest.TestCase):
-    def test_mark_records_current_angle_and_gripper_uses_open_closed(self):
+    def test_nack_reason_four_reports_validation_failure(self):
         link = FakeLink()
-        link.queue_reply(ack())
+        link.queue_reply(nack(MessageType.CAL_ARM_MOVE, 4, 1))
         session, output = make_session(link)
-        session.handle_line("j3 78")
-        session.handle_line("mark j3 open")
-        self.assertEqual(session.marks[(3, "open")], 78)
-        session.handle_line("mark j3 center")
-        self.assertIn("open", output[-1])
-        self.assertTrue(output[-1].startswith("error:"))
+        session.commanded[2] = 90
+        session.handle_line("j2 170")
+        self.assertIn("validation failed", output[0])
+        self.assertEqual(session.commanded[2], 90)
 
-    def test_status_shows_telemetry_from_sensor_arm_frames(self):
+    def test_stale_ack_cannot_satisfy_later_actuator_command(self):
         link = FakeLink()
-        link.queue_reply(ack())
+        link.queue_reply(
+            ack(MessageType.CAL_ARM_MOVE, 0)
+            + ack(MessageType.CAL_ARM_MOVE, 1)
+        )
         session, output = make_session(link)
         session.handle_line("j0 90")
-        link._pending += sensor_arm((90, 91, 92, 80))
-        session.handle_line("s")
-        self.assertIn("91", output[-1])
+        self.assertEqual(session.commanded[0], 90)
+        self.assertFalse(any(line.startswith("error:") for line in output))
 
-    def test_fold_estimate_uses_marked_centers_and_directions(self):
+    def test_center_and_direction_send_explicit_joint_reference(self):
         link = FakeLink()
-        for sequence in range(1, 6):
-            link.queue_reply(ack(sequence))
         session, output = make_session(link)
         session.handle_line("j1 90")
-        session.handle_line("j2 90")
-        session.handle_line("mark j1 center")
-        session.handle_line("mark j2 center")
-        session.handle_line("dir j1 +1")
-        session.handle_line("dir j2 +1")
-        session.handle_line("j2 45")
-        self.assertIn("fold estimate: 135", output[-1])
-
-
-class FirmwareSyncTests(unittest.TestCase):
-    def test_center_plus_dir_pushes_servo_parameters_to_firmware(self):
-        link = FakeLink()
-        link.queue_reply(ack(1))
-        session, output = make_session(link)
         session.handle_line("j1 88")
-        link._pending += status(revision=4)
-        link.queue_reply(ack(2, revision=5))
         session.handle_line("mark j1 center")
-        link.queue_reply(ack(3, revision=6))
         session.handle_line("dir j1 -1")
-        sent = ProtocolDecoder().feed(b"".join(link.written))
-        parameter_frames = [
-            message.payload for message in sent
-            if message.message_type == MessageType.PARAMETER_SET
+        messages = ProtocolDecoder().feed(b"".join(link.written))
+        references = [
+            message
+            for message in messages
+            if message.message_type == MessageType.CAL_SET_JOINT_REFERENCE
         ]
-        self.assertEqual(len(parameter_frames), 1)
+        self.assertEqual(len(references), 1)
         self.assertEqual(
-            parameter_frames[0],
-            struct.pack("<BBH", 1, 1, 4) + struct.pack("<BBbb", 0, 180, -2, -1),
+            references[0].payload,
+            struct.pack("<BBBbb", 1, 0, 180, -2, -1),
         )
-        self.assertEqual(session.synced.get(1), 5)
+        self.assertEqual(session.synced[1], 88)
         self.assertTrue(any("synced j1" in line for line in output))
 
-    def test_sync_deferred_without_firmware_revision(self):
+
+class OnDemandReportTests(unittest.TestCase):
+    def test_status_requests_arm_report_instead_of_streaming_data(self):
         link = FakeLink()
-        link.queue_reply(bare_ack(1))
+        link.queue_reply(arm_report(1))
         session, output = make_session(link)
-        session.handle_line("j2 95")
-        session.handle_line("mark j2 center")
-        session.handle_line("dir j2 +1")
-        self.assertIn(2, session.directions)
-        self.assertNotIn(2, session.synced)
-        self.assertTrue(any("sync deferred" in line for line in output))
-        self.assertEqual(len(link.written), 1)
+        session.handle_line("s")
+        request = decode_message(link.written[-1])
+        self.assertEqual(request.message_type, MessageType.CAL_READ_ARM)
+        self.assertIn("91", output[-1])
+        self.assertIn("reported", output[-1])
 
-    def test_manual_sync_reports_when_nothing_is_ready(self):
+    def test_status_still_shows_local_records_when_arm_is_disabled(self):
         link = FakeLink()
         session, output = make_session(link)
-        session.handle_line("sync")
-        self.assertTrue(any("nothing to sync" in line for line in output))
+        session.hello = {"arm_enabled": False}
+        session.motor_map[0] = (1, 1)
+        session.handle_line("s")
+        self.assertEqual(link.written, [])
+        self.assertIn("motor map: ch0->fr+", output[-1])
 
+    def test_counts_requests_both_drive_pages(self):
+        link = FakeLink()
+        link.queue_reply(counts_report(1, (5, -6, 7, -8), (100, -200, 300, -400)))
+        link.queue_reply(speed_report(2, (10, -20, 30, -40)))
+        session, output = make_session(link)
+        session.handle_line("counts")
+        requests = [decode_message(packet) for packet in link.written]
+        self.assertEqual(
+            [(request.message_type, request.payload) for request in requests],
+            [
+                (MessageType.CAL_READ_DRIVE, b"\x00"),
+                (MessageType.CAL_READ_DRIVE, b"\x01"),
+            ],
+        )
+        self.assertIn("-200", output[-1])
+        self.assertIn("-40", output[-1])
 
-def encoder_totals(increments, totals) -> bytes:
-    payload = struct.pack("<4h", *increments)
-    payload += struct.pack("<4i", *totals)
-    payload += bytes([0x0F]) + struct.pack("<H", 20)
-    return encode_message(MessageType.ENCODER_TOTALS_TELEMETRY, 11, payload)
+    def test_sensors_requests_single_sensor_report(self):
+        link = FakeLink()
+        link.queue_reply(sensor_report(1, (101, 102, 103, 104, 105, 106), 0x2F))
+        session, output = make_session(link)
+        session.handle_line("sensors")
+        request = decode_message(link.written[-1])
+        self.assertEqual(request.message_type, MessageType.CAL_READ_SENSOR)
+        self.assertIn("106", output[-1])
+        self.assertIn("no", output[-1])
+
+    def test_system_report_prints_stack_pass_and_fail(self):
+        for remaining, verdict in ((256, "PASS"), (255, "FAIL")):
+            with self.subTest(remaining=remaining):
+                link = FakeLink()
+                link.queue_reply(system_report(1, remaining))
+                session, output = make_session(link)
+                session.handle_line("stack")
+                request = decode_message(link.written[-1])
+                self.assertEqual(
+                    request.message_type, MessageType.CAL_READ_SYSTEM
+                )
+                self.assertIn(f"{remaining} B", output[-1])
+                self.assertIn(verdict, output[-1])
+
+    def test_invalid_drive_channels_are_not_printed_as_calibration_values(self):
+        link = FakeLink()
+        link.queue_reply(
+            counts_report(
+                1,
+                (5, -600, 7, -8),
+                (100, -20000, 300, -400),
+                valid_mask=0x0D,
+            )
+        )
+        link.queue_reply(
+            speed_report(2, (10, -2000, 30, -40), valid_mask=0x0D)
+        )
+        session, output = make_session(link)
+        session.handle_line("counts")
+        table = output[-1]
+        self.assertIn("INVALID - do not calibrate", table)
+        self.assertNotIn("-600", table)
+        self.assertNotIn("-20000", table)
+        self.assertNotIn("-2000", table)
 
 
 class MotorCommandTests(unittest.TestCase):
-    def test_open_loop_spin_sends_drive_calibration_frame(self):
+    def test_open_and_closed_loop_spins_use_v3_calibration_command(self):
         link = FakeLink()
-        link.queue_reply(ack())
         session, output = make_session(link)
         session.handle_line("m0 30 2")
-        sent = ProtocolDecoder().feed(b"".join(link.written))
-        frames = [
-            message.payload for message in sent
-            if message.message_type == MessageType.DRIVE_CALIBRATION_COMMAND
-        ]
-        self.assertEqual(frames, [struct.pack("<BBhH", 0, 0, 30, 2000)])
-        self.assertIn("spinning", output[-1])
-
-    def test_closed_loop_spin_uses_mode_one_and_default_duration(self):
-        link = FakeLink()
-        link.queue_reply(ack())
-        session, _ = make_session(link)
         session.handle_line("v2 -150")
-        sent = ProtocolDecoder().feed(b"".join(link.written))
-        self.assertEqual(
-            sent[-1].payload, struct.pack("<BBhH", 1, 2, -150, 2000)
-        )
+        messages = [decode_message(packet) for packet in link.written]
+        self.assertEqual(messages[0].message_type, MessageType.CAL_DRIVE_SPIN)
+        self.assertEqual(messages[0].payload, struct.pack("<BBhH", 0, 0, 30, 2000))
+        self.assertEqual(messages[1].payload, struct.pack("<BBhH", 1, 2, -150, 2000))
+        self.assertIn("spinning", output[-1])
 
     def test_spin_values_beyond_limits_are_rejected_locally(self):
         link = FakeLink()
@@ -239,84 +311,203 @@ class MotorCommandTests(unittest.TestCase):
         self.assertEqual(link.written, [])
         self.assertTrue(all(line.startswith("error:") for line in output))
 
-    def test_stop_sends_zero_spin(self):
-        link = FakeLink()
-        link.queue_reply(ack())
-        session, output = make_session(link)
-        session.handle_line("stop")
-        sent = ProtocolDecoder().feed(b"".join(link.written))
-        self.assertEqual(sent[-1].payload, struct.pack("<BBhH", 0, 0, 0, 0))
-        self.assertIn("stopped", output[-1])
-
-    def test_counts_shows_encoder_telemetry(self):
-        link = FakeLink()
-        session, output = make_session(link)
-        link._pending += encoder_totals((5, -6, 7, -8), (100, -200, 300, -400))
-        session.handle_line("counts")
-        self.assertIn("-200", output[-1])
-        self.assertIn("7", output[-1])
-
-
-class DriveExportTests(unittest.TestCase):
-    def test_motor_and_encoder_records_shape_the_export_block(self):
+    def test_session_shutdown_sends_fail_closed_estop_burst(self):
         link = FakeLink()
         session, _ = make_session(link)
-        for command in (
-            "motor 0 fr fwd", "motor 1 fl rev", "motor 2 rr fwd",
-            "motor 3 rl fwd",
-            "enc 0 fr rev", "enc 1 fl fwd", "enc 2 rr fwd", "enc 3 rl fwd",
-            "geom 65 4680 160 170",
-        ):
-            session.handle_line(command)
-        block = session.export_block()
-        self.assertIn("MotorCommandMap[4] = {1, 0, 3, 2};", block)
-        self.assertIn("MotorCommandSign[4] = {-1, 1, 1, 1};", block)
-        self.assertIn("EncoderChannelMap[4] = {1, 0, 3, 2};", block)
-        self.assertIn("EncoderDirectionSign[4] = {1, -1, 1, 1};", block)
-        self.assertIn("constexpr uint16_t WheelDiameterMm = 65;", block)
+        session.shutdown()
+        self.assertEqual(
+            [decode_message(packet).message_type for packet in link.written],
+            [MessageType.ESTOP_ASSERT] * 3 + [MessageType.DISARM],
+        )
+        self.assertTrue(link.flushed)
 
-    def test_missing_motor_records_warn_in_export(self):
+    def test_start_recovers_prior_estop_with_neutral_stream_and_verifies_hello(self):
         link = FakeLink()
         session, _ = make_session(link)
-        block = session.export_block()
-        self.assertIn("motor record missing for the front-left wheel", block)
-        self.assertIn("geometry not recorded", block)
+        session.start()
+        messages = [decode_message(packet) for packet in link.written]
+        self.assertEqual(
+            [message.message_type for message in messages[:3]],
+            [MessageType.ESTOP_ASSERT] * 3,
+        )
+        controls = [
+            message
+            for message in messages
+            if message.message_type == MessageType.CONTROL
+        ]
+        self.assertGreaterEqual(len(controls), 22)
+        self.assertEqual(
+            [message.message_type for message in messages[-2:]],
+            [MessageType.CLEAR_ESTOP, MessageType.HELLO],
+        )
+        self.assertNotIn(
+            MessageType.DISARM,
+            [message.message_type for message in messages[3:]],
+        )
+        self.assertEqual(session.hello["profile"], 7)
+
+    def test_start_drains_estop_burst_before_timed_control_stream(self):
+        timeline = ManualClock()
+
+        class TimedLink(FakeLink):
+            def __init__(self) -> None:
+                super().__init__()
+                self.write_times: list[float] = []
+
+            def write(self, data: bytes) -> int:
+                self.write_times.append(timeline())
+                return super().write(data)
+
+        link = TimedLink()
+        session = CalibrationSession(
+            link,
+            out=lambda _line: None,
+            clock=timeline,
+            sleep=timeline.sleep,
+        )
+        session.start()
+        messages = [
+            decode_message(packet) for packet in link.written
+        ]
+        first_control = next(
+            index
+            for index, message in enumerate(messages)
+            if message.message_type == MessageType.CONTROL
+        )
+        self.assertGreaterEqual(
+            link.write_times[first_control] - link.write_times[2],
+            12 * 10.0 / 9600,
+        )
+        control_times = [
+            timestamp
+            for message, timestamp in zip(messages, link.write_times)
+            if message.message_type == MessageType.CONTROL
+        ]
+        self.assertTrue(
+            all(
+                abs(later - earlier - 1.0 / 30.0) < 1e-9
+                for earlier, later in zip(
+                    control_times, control_times[1:]
+                )
+            )
+        )
+
+    def test_stress_sends_only_fixed_rate_neutral_control_frames(self):
+        link = FakeLink()
+        timeline = ManualClock()
+        output: list[str] = []
+        session = CalibrationSession(
+            link,
+            out=output.append,
+            clock=timeline,
+            sleep=timeline.sleep,
+        )
+        session.handle_line("stress 1")
+        messages = [decode_message(packet) for packet in link.written]
+        self.assertEqual(len(messages), 31)
+        self.assertTrue(
+            all(
+                message.message_type == MessageType.CONTROL
+                for message in messages
+            )
+        )
+        self.assertIn(
+            "target 30 Hz, actual 30.00 Hz, max interval 33.33 ms,"
+            " missed slots 0",
+            output[-1],
+        )
+
+    def test_blocked_write_anchors_next_control_after_completion(self):
+        timeline = ManualClock()
+
+        class DelayedLink(FakeLink):
+            def __init__(self) -> None:
+                super().__init__()
+                self.write_starts: list[float] = []
+                self.write_completions: list[float] = []
+
+            def write(self, data: bytes) -> int:
+                self.write_starts.append(timeline())
+                timeline.advance(0.025)
+                written = super().write(data)
+                self.write_completions.append(timeline())
+                return written
+
+        link = DelayedLink()
+        output: list[str] = []
+        session = CalibrationSession(
+            link,
+            out=output.append,
+            clock=timeline,
+            sleep=timeline.sleep,
+        )
+        session.handle_line("stress 1")
+        response_windows = [
+            later_start - earlier_completion
+            for earlier_completion, later_start in zip(
+                link.write_completions, link.write_starts[1:]
+            )
+        ]
+        self.assertEqual(len(link.write_starts), 31)
+        self.assertTrue(
+            all(
+                abs(window - 1.0 / 30.0) < 1e-9
+                for window in response_windows
+            )
+        )
+        self.assertIn(
+            "actual 17.14 Hz, max interval 58.33 ms, missed slots 0",
+            output[-1],
+        )
 
 
 class ExportTests(unittest.TestCase):
-    def test_export_produces_paste_block_with_marked_values(self):
+    def test_motor_encoder_and_joint_records_shape_export(self):
         link = FakeLink()
-        for sequence in range(1, 12):
-            link.queue_reply(ack(sequence))
         session, _ = make_session(link)
         for command in (
-            "j0 90", "mark j0 center", "j0 5", "mark j0 lower",
-            "j0 178", "mark j0 upper", "dir j0 +1",
-            "j1 88", "mark j1 center", "dir j1 -1",
-            "j3 78", "mark j3 open", "j3 24", "mark j3 closed",
+            "j0 90",
+            "mark j0 center",
+            "j0 5",
+            "mark j0 lower",
+            "j0 178",
+            "mark j0 upper",
+            "dir j0 +1",
+            "j1 90",
+            "j1 88",
+            "mark j1 center",
+            "dir j1 -1",
+            "j3 90",
+            "j3 78",
+            "mark j3 open",
+            "j3 24",
+            "mark j3 closed",
+            "motor 0 fr fwd",
+            "motor 1 fl rev",
+            "motor 2 rr fwd",
+            "motor 3 rl fwd",
+            "enc 0 fr rev",
+            "enc 1 fl fwd",
+            "enc 2 rr fwd",
+            "enc 3 rl fwd",
+            "geom 65 4680 160 170",
         ):
             session.handle_line(command)
         block = session.export_block()
         self.assertIn("constexpr uint8_t BaseZeroDegrees = 90;", block)
         self.assertIn("constexpr uint8_t ShoulderZeroDegrees = 88;", block)
         self.assertIn("constexpr uint8_t GripperOpenDegrees = 78;", block)
-        self.assertIn("constexpr uint8_t GripperClosedDegrees = 24;", block)
-        self.assertIn("ServoLowerDegrees[4] = {5, ", block)
         self.assertIn("ServoDirectionSign[4] = {1, -1, 1, 1};", block)
-        self.assertIn("WARNINGS", block)
-        self.assertIn("j2 center not marked", block)
+        self.assertIn("MotorCommandMap[4] = {1, 0, 3, 2};", block)
+        self.assertIn("EncoderChannelMap[4] = {1, 0, 3, 2};", block)
+        self.assertIn("constexpr uint16_t WheelDiameterMm = 65;", block)
 
-    def test_export_warns_when_base_travel_is_under_180(self):
-        link = FakeLink()
-        for sequence in range(1, 4):
-            link.queue_reply(ack(sequence))
-        session, _ = make_session(link)
-        for command in (
-            "j0 30", "mark j0 lower", "j0 150", "mark j0 upper",
-        ):
-            session.handle_line(command)
+    def test_missing_records_are_called_out_as_warnings(self):
+        session, _ = make_session(FakeLink())
         block = session.export_block()
-        self.assertIn("requires >= 180", block)
+        self.assertIn("WARNINGS", block)
+        self.assertIn("motor record missing", block)
+        self.assertIn("geometry not recorded", block)
 
 
 if __name__ == "__main__":

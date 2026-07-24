@@ -2,14 +2,19 @@
 
 #include <stdint.h>
 
-#if (defined(ROBOT_BACKEND_UART) + defined(ROBOT_BACKEND_NONE)) != 1
-#error "Select exactly one robot drive backend"
+#ifndef ROBOT_DRIVER_ENABLED
+#define ROBOT_DRIVER_ENABLED 0
 #endif
 
-// ROBOT_CALIBRATION selects the combined servo+motor calibration image
-// driven by `warehouse-robot calibrate` (see docs/calibration.md). The two
-// *_CALIBRATED flags are flipped to 1 in platformio.ini once the matching
-// chapter of docs/calibration.md has been completed.
+#ifndef ROBOT_DRIVE_ENABLED
+#define ROBOT_DRIVE_ENABLED 0
+#endif
+#ifndef ROBOT_ARM_ENABLED
+#define ROBOT_ARM_ENABLED 0
+#endif
+#ifndef ROBOT_SENSOR_ENABLED
+#define ROBOT_SENSOR_ENABLED 0
+#endif
 #ifndef ROBOT_CALIBRATION
 #define ROBOT_CALIBRATION 0
 #endif
@@ -20,22 +25,38 @@
 #define ROBOT_DRIVE_CALIBRATED 0
 #endif
 #ifndef ROBOT_HOST_BAUD
-#define ROBOT_HOST_BAUD 38400UL
+#define ROBOT_HOST_BAUD 9600UL
+#endif
+#ifndef ROBOT_DRIVER_CONTROL_CLOSE
+#define ROBOT_DRIVER_CONTROL_CLOSE 0
+#endif
+#ifndef ROBOT_DRIVER_CONTROL_OPEN
+#define ROBOT_DRIVER_CONTROL_OPEN 0
 #endif
 
-#if defined(ROBOT_BACKEND_UART)
-#if (defined(ROBOT_UART_CLOSED_LOOP) + defined(ROBOT_UART_OPEN_LOOP)) != 1
+#if ROBOT_DRIVER_ENABLED
+#if (ROBOT_DRIVER_CONTROL_CLOSE + ROBOT_DRIVER_CONTROL_OPEN) != 1
 #error "Select exactly one UART motor-controller mode"
 #endif
 #define ROBOT_HAS_ENCODER_FEEDBACK 1
 #else
+#if ROBOT_DRIVER_CONTROL_CLOSE || ROBOT_DRIVER_CONTROL_OPEN
+#error "A motor-controller mode requires ROBOT_DRIVER_ENABLED=1"
+#endif
 #define ROBOT_HAS_ENCODER_FEEDBACK 0
+#endif
+
+#if ROBOT_DRIVE_ENABLED && !ROBOT_DRIVER_ENABLED
+#error "ROBOT_DRIVE_ENABLED requires ROBOT_DRIVER_ENABLED"
+#endif
+
+#if ROBOT_HOST_BAUD != 9600UL && ROBOT_HOST_BAUD != 38400UL
+#error "NeoSWSerial host link supports only 9600 or 38400 baud in this project"
 #endif
 
 namespace robot {
 namespace config {
 
-constexpr unsigned long UsbBaud = 115200UL;
 constexpr unsigned long BluetoothBaud = ROBOT_HOST_BAUD;
 constexpr unsigned long MotorBoardBaud = 115200UL;
 
@@ -47,10 +68,17 @@ constexpr uint32_t EncoderQueryPeriodUs = 20000UL;
 constexpr uint32_t ChassisRampPeriodUs = 10000UL;
 constexpr uint32_t ServoPeriodUs = 20000UL;
 constexpr uint32_t SonarGroupPeriodUs = 60000UL;
-constexpr uint32_t TelemetryPeriodUs =
-    ROBOT_HOST_BAUD == 9600UL ? 200000UL : 100000UL;
+constexpr uint32_t CriticalStatusPeriodUs = 500000UL;
+constexpr uint32_t HostControlPeriodUs = 33333UL;
+// A normal typed safety command may immediately follow the 11-byte control
+// frame. Ten milliseconds lets its seven 9600-baud bytes arrive before the
+// Uno opens the reverse-direction response window.
+constexpr uint32_t HostTransmitStartDelayUs = 10000UL;
+constexpr uint32_t HostControlWireTimeUs =
+    (11UL * 10UL * 1000000UL + BluetoothBaud - 1UL) / BluetoothBaud;
+constexpr uint32_t HostTransmitWindowEndUs =
+    HostControlPeriodUs - HostControlWireTimeUs - 2000UL;
 constexpr uint32_t EncoderTotalPeriodUs = 500000UL;
-constexpr uint32_t BatteryPeriodUs = 1000000UL;
 constexpr uint32_t QueryTimeoutUs = 15000UL;
 constexpr uint32_t FeedbackStaleMs = 100UL;
 constexpr uint32_t SensorStaleMs = 300UL;
@@ -60,8 +88,17 @@ constexpr uint32_t MaxLoopGapUs = 50000UL;
 constexpr uint32_t MaxMotionDtUs = 50000UL;
 constexpr uint32_t MotorLateThresholdUs = 10000UL;
 
+constexpr bool DriverEnabled = ROBOT_DRIVER_ENABLED != 0;
+constexpr bool DriveEnabled = ROBOT_DRIVE_ENABLED != 0;
+constexpr bool ArmEnabled = ROBOT_ARM_ENABLED != 0;
+constexpr bool SensorEnabled = ROBOT_SENSOR_ENABLED != 0;
 constexpr bool DriveCalibrated = ROBOT_DRIVE_CALIBRATED != 0;
 constexpr bool ArmCalibrated = ROBOT_ARM_CALIBRATED != 0;
+
+static_assert(
+    HostTransmitWindowEndUs > HostTransmitStartDelayUs,
+    "Configured host baud leaves no safe response window"
+);
 
 constexpr float FirstLinkMm = 120.0F;
 constexpr float SecondLinkMm = 120.0F;
@@ -104,7 +141,7 @@ constexpr uint8_t ElbowZeroDegrees = 95;
 constexpr uint8_t GripperOpenDegrees = 80;
 constexpr uint8_t GripperClosedDegrees = 25;
 
-// Per-joint servo calibration measured with docs/arm-calibration.md.
+// Per-joint servo calibration measured with docs/calibration.md chapter 2.
 // Joint order: 0 base, 1 shoulder, 2 elbow, 3 gripper. The `calibrate`
 // REPL's `export` command prints this whole block ready to paste.
 constexpr uint8_t ServoLowerDegrees[4] = {1, 40, 40, 5};
@@ -114,7 +151,7 @@ constexpr uint8_t ServoCenterDegrees[4] = {
 };
 constexpr int8_t ServoDirectionSign[4] = {1, -1, 1, 1};
 
-// Per-wheel drive calibration measured with docs/calibration.md chapter 2.
+// Per-wheel drive calibration measured with docs/calibration.md chapter 3.
 // Logical wheel order everywhere: 0 front-left, 1 front-right, 2 rear-left,
 // 3 rear-right. "Board channel" is the motor/encoder index (0..3 = M1..M4)
 // on the UART motor driver board. The `calibrate` REPL's `export` command
@@ -137,7 +174,7 @@ constexpr uint16_t MinAssistDistanceMm = 120;
 constexpr uint16_t AlignmentToleranceMm = 15;
 
 // Caps for the calibration profile's motor spin commands (docs/calibration.md
-// chapter 2): open-loop percent, closed-loop wheel speed, and run duration.
+// chapter 3): open-loop percent, closed-loop wheel speed, and run duration.
 constexpr int16_t CalibrationSpinLimitPercent = 100;
 constexpr int16_t CalibrationWheelLimitMmS = 200;
 constexpr uint16_t CalibrationSpinMaxDurationMs = 10000;

@@ -40,6 +40,7 @@ class ArmSubsystem {
     bool calibrated() const;
     bool faulted() const;
     bool targetLimited() const;
+    bool servoTimingActive() const;
 
   private:
     Servo servos_[4];

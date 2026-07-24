@@ -72,10 +72,4 @@ bool MotorBoardFrameParser::parseFour(
     return *cursor == '\0';
 }
 
-bool MotorBoardFrameParser::parseOne(
-    const char *cursor, int32_t &value, int32_t minimum, int32_t maximum
-) {
-    return parseInteger(cursor, value, minimum, maximum, '!') && *cursor == '\0';
-}
-
 } // namespace robot

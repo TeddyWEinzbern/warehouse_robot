@@ -2,27 +2,31 @@
 
 Keeps one serial connection open for the whole session, jogs arm joints with
 absolute or incremental commands, spins individual drive motors open-loop or
-closed-loop while DISARMED, mirrors firmware telemetry, and exports a
+closed-loop while DISARMED, requests measurements on demand, and exports a
 paste-ready calibration block for src/app/BuildConfig.h. The host link is
-the A4/A5 SoftwareSerial (HC-05 or USB-TTL adapter); the hardware UART belongs
+the A4/A5 NeoSWSerial link (HC-06 or USB-TTL adapter); the hardware UART belongs
 to the motor board.
 """
 
 from __future__ import annotations
 
-import struct
+import math
 import time
 from typing import Any, Callable
 
 from .protocol import (
+    CalibrationReportKind,
+    ControlFrame,
     MessageType,
-    ParameterGroup,
     ProtocolDecoder,
-    build_parameter_data,
-    encode_drive_calibration,
+    decode_message_data,
+    encode_cal_arm_move,
+    encode_cal_drive_spin,
+    encode_cal_joint_reference,
+    encode_cal_read_drive,
+    encode_control_frame,
+    encode_estop,
     encode_message,
-    encode_parameter_set,
-    telemetry_to_dict,
 )
 
 JOINT_NAMES = ("base", "shoulder", "elbow", "gripper")
@@ -33,20 +37,24 @@ ACK_TIMEOUT_S = 3.0
 SPIN_MAX_PERCENT = 100
 SPIN_MAX_MM_S = 200
 SPIN_MAX_SECONDS = 10.0
+CONTROL_RATE_HZ = 30.0
+STARTUP_NEUTRAL_SECONDS = 0.7
+STRESS_DEFAULT_SECONDS = 10.0
+STRESS_MAX_SECONDS = 60.0
 
 NACK_REASONS = {
     1: "malformed frame",
     2: "unsupported command",
     3: "invalid state: firmware must be the `calibration` build, DISARMED,"
        " and (for motor spins) the motor board must be connected and powered",
-    4: "parameter revision mismatch",
-    5: "blocked: shoulder/elbow coupling guard, or spin value/duration"
-       " outside the calibration limits",
+    4: "validation failed: shoulder/elbow coupling guard, or a value/duration"
+       " is outside the calibration limits",
 }
 
 HELP_TEXT = """arm commands:
   j<n> <angle>     move joint n (0 base, 1 shoulder, 2 elbow, 3 gripper)
-                   to an absolute servo angle 0-180, e.g. `j2 95`
+                   to an absolute servo angle 0-180; the first command for
+                   every joint must be `j<n> 90`, then e.g. `j2 95`
   j<n> +<d>|-<d>   nudge joint n by d degrees, e.g. `j1 +2`
   mark j<n> <what> record the current angle of joint n as one of:
                    lower / upper / center (j3 uses open / closed instead)
@@ -62,6 +70,10 @@ motor commands (wheels raised off the ground!):
                     use after `motor`/`enc` mappings are measured
   stop              stop any running spin immediately
   counts            show encoder increments/totals and measured speeds
+  sensors           request and show the six sensor distances
+  stack | system    show minimum untouched stack and PASS/FAIL against 256 B
+  stress [seconds]  target neutral control at 30 Hz (default 10 s, max 60 s)
+                    and report the actual combined-load qualification rate
   motor <n> <wheel> <fwd|rev>  record which wheel board channel n drives
                     and whether positive spins it forward; wheel is one
                     of fl fr rl rr, e.g. `motor 0 fl fwd`
@@ -73,7 +85,7 @@ session commands:
   s                show joint state, motor mappings, marks, fold estimate
   export           print the BuildConfig.h block from the recorded marks
   help             show this text
-  q                quit (servos keep holding their last position)"""
+  q                quit (latches E-stop; servos hold their last position)"""
 
 MARK_NAMES = ("lower", "upper", "center", "open", "closed")
 
@@ -131,13 +143,16 @@ class CalibrationSession:
         self.out = out
         self.clock = clock
         self.sleep = sleep
+        self.baud = int(getattr(link, "baudrate", 9600))
+        if self.baud not in (9600, 38400):
+            raise ValueError("calibration link baud must be 9600 or 38400")
         self.decoder = ProtocolDecoder()
         self.sequence = 0
+        self.fast_sequence = 0
         self.commanded: list[int | None] = [None] * JOINT_COUNT
-        self.telemetry: list[int] | None = None
+        self.reported_servo: list[int] | None = None
         self.marks: dict[tuple[int, str], int] = {}
         self.directions: dict[int, int] = {}
-        self.revision: int | None = None
         self.synced: dict[int, int] = {}
         # Motor calibration records: board/encoder channel -> (wheel, sign).
         self.motor_map: dict[int, tuple[int, int]] = {}
@@ -146,73 +161,230 @@ class CalibrationSession:
         self.increments: list[int] | None = None
         self.totals: list[int] | None = None
         self.measured_mm_s: list[int] | None = None
+        self.counts_valid_mask = 0
+        self.speed_valid_mask = 0
+        self.sensor_mm: list[int] | None = None
+        self.sensor_valid_mask = 0
+        self.minimum_untouched_stack_bytes: int | None = None
+        self.hello: dict[str, Any] = {}
 
     # -- transport helpers --------------------------------------------------
 
     def start(self) -> None:
-        """Wait out the auto-reset after port open, then force DISARMED."""
+        """Stabilize the HC-06 link and recover a prior fail-closed exit."""
         self.sleep(2.0)
-        self._send(MessageType.DISARM)
-        self._pump()
+        queued_bytes = 0
+        for _ in range(3):
+            packet = encode_estop(self._next_fast_sequence())
+            self.link.write(packet)
+            queued_bytes += len(packet)
+        # RFCOMM writes can return after only buffering bytes. Let the HC-06
+        # drain the complete E-stop burst before the first timed control so
+        # the next control cannot become a short-interval queued frame.
+        self.sleep(queued_bytes * 10.0 / self.baud)
+        self._send_neutral_stream(STARTUP_NEUTRAL_SECONDS)
+        # CLEAR_ESTOP returns a fault-free calibration image to DISARMED.
+        # Do not queue DISARM beside it: firmware intentionally gives DISARM
+        # dominance within one receive batch, which would suppress the clear.
+        self._send(MessageType.CLEAR_ESTOP)
+        self._send(MessageType.HELLO)
+        self._await_hello()
 
     def _next_sequence(self) -> int:
         self.sequence = (self.sequence + 1) % 256
         return self.sequence
 
-    def _send(self, message_type: MessageType, payload: bytes = b"") -> None:
-        self.link.write(encode_message(message_type, self._next_sequence(), payload))
+    def _next_fast_sequence(self) -> int:
+        value = self.fast_sequence
+        self.fast_sequence = (self.fast_sequence + 1) % 64
+        return value
+
+    def _send(self, message_type: MessageType, payload: bytes = b"") -> int:
+        sequence = self._next_sequence()
+        self.link.write(encode_message(message_type, sequence, payload))
+        return sequence
+
+    def shutdown(self) -> None:
+        """Best-effort fail-closed stop before the serial link is released."""
+        try:
+            for _ in range(3):
+                self.link.write(encode_estop(self._next_fast_sequence()))
+            self.link.write(
+                encode_message(MessageType.DISARM, self._next_sequence())
+            )
+            flush = getattr(self.link, "flush", None)
+            if callable(flush):
+                flush()
+        except Exception:
+            # The bounded firmware spin duration and motor-board watchdog are
+            # the remaining guards if the transport has already disappeared.
+            pass
 
     def _pump(self) -> list[Any]:
         waiting = int(getattr(self.link, "in_waiting", 0))
         messages = self.decoder.feed(self.link.read(waiting) if waiting else b"")
         for message in messages:
-            if message.message_type == MessageType.SENSOR_ARM_TELEMETRY:
-                decoded = telemetry_to_dict(message)
-                if decoded and decoded.get("kind") == "sensor_arm":
-                    self.telemetry = list(decoded["servo_targets"])
-            elif message.message_type == MessageType.STATUS_TELEMETRY:
-                decoded = telemetry_to_dict(message)
-                if decoded and decoded.get("kind") == "status":
-                    self.revision = decoded["revision"]
-            elif message.message_type == MessageType.ENCODER_TOTALS_TELEMETRY:
-                decoded = telemetry_to_dict(message)
-                if decoded and decoded.get("kind") == "encoder_totals":
-                    self.increments = list(decoded["raw_increments"])
-                    self.totals = list(decoded["totals"])
-            elif message.message_type == MessageType.DRIVE_FEEDBACK_TELEMETRY:
-                decoded = telemetry_to_dict(message)
-                if decoded and decoded.get("kind") == "drive_feedback":
-                    self.measured_mm_s = list(decoded["measured_speeds"])
-            elif (
-                message.message_type == MessageType.ACK
-                and len(message.payload) >= 3
-            ):
-                self.revision = int.from_bytes(message.payload[1:3], "little")
+            decoded = decode_message_data(message)
+            kind = decoded.get("kind")
+            if kind == "hello":
+                self.hello = decoded
+            elif kind == "cal_arm":
+                self.reported_servo = list(decoded["servo_targets"])
+            elif kind == "cal_drive_counts":
+                self.increments = list(decoded["raw_increments"])
+                self.totals = list(decoded["totals"])
+                self.counts_valid_mask = int(decoded["valid_mask"])
+            elif kind == "cal_drive_speed":
+                self.measured_mm_s = list(decoded["measured_speeds"])
+                self.speed_valid_mask = int(decoded["valid_mask"])
+            elif kind == "cal_sensor":
+                self.sensor_mm = list(decoded["distances_mm"])
+                self.sensor_valid_mask = int(decoded["valid_mask"])
+            elif kind == "cal_system":
+                self.minimum_untouched_stack_bytes = int(
+                    decoded["minimum_untouched_stack_bytes"]
+                )
         return messages
 
-    def _await_reply(self) -> Any:
-        """Pump until an ACK or NACK arrives; raise on NACK or timeout."""
+    def _await_hello(self) -> None:
+        deadline = self.clock() + ACK_TIMEOUT_S
+        while self.clock() < deadline:
+            self._pump()
+            if self.hello:
+                if self.hello.get("profile") != 7:
+                    raise CalibrationError(
+                        "connected firmware is not the `calibration` image"
+                    )
+                return
+            self.sleep(0.01)
+        raise CalibrationError(
+            "timed out waiting for the protocol-v3 HELLO_RESPONSE"
+        )
+
+    def _send_neutral_stream(
+        self, seconds: float
+    ) -> tuple[int, float, float, int]:
+        period = 1.0 / CONTROL_RATE_HZ
+        frame_count = max(1, int(math.ceil(seconds * CONTROL_RATE_HZ)) + 1)
+        next_deadline = self.clock()
+        first_sent_at: float | None = None
+        last_sent_at: float | None = None
+        maximum_interval = 0.0
+        missed_slots = 0
+        for _ in range(frame_count):
+            now = self.clock()
+            if now < next_deadline:
+                self.sleep(next_deadline - now)
+                now = self.clock()
+            elif last_sent_at is not None:
+                missed_slots += int((now - next_deadline) // period)
+            self.link.write(
+                encode_control_frame(
+                    ControlFrame(sequence=self._next_fast_sequence())
+                )
+            )
+            # Treat write() completion as the conservative start of UART
+            # transmission. A blocked RFCOMM writer therefore lowers the
+            # observed rate instead of consuming the Uno's response window.
+            sent_at = self.clock()
+            next_deadline = sent_at + period
+            if first_sent_at is None:
+                first_sent_at = sent_at
+            if last_sent_at is not None:
+                maximum_interval = max(
+                    maximum_interval, sent_at - last_sent_at
+                )
+            last_sent_at = sent_at
+        elapsed = (
+            0.0
+            if first_sent_at is None or last_sent_at is None
+            else last_sent_at - first_sent_at
+        )
+        actual_rate_hz = (
+            CONTROL_RATE_HZ
+            if frame_count <= 1 or elapsed <= 0.0
+            else (frame_count - 1) / elapsed
+        )
+        return (
+            frame_count,
+            actual_rate_hz,
+            maximum_interval * 1000.0,
+            missed_slots,
+        )
+
+    def _await_reply(
+        self,
+        *,
+        expected_sequence: int,
+        acknowledged_type: MessageType | None = None,
+        report_kind: CalibrationReportKind | None = None,
+    ) -> Any:
+        """Wait for an ACK or one requested CAL_REPORT; fail on any NACK."""
         deadline = self.clock() + ACK_TIMEOUT_S
         while self.clock() < deadline:
             for message in self._pump():
+                if message.sequence != expected_sequence:
+                    continue
+                decoded = decode_message_data(message)
                 if message.message_type == MessageType.ACK:
-                    return message
+                    if (
+                        report_kind is None
+                        and acknowledged_type is not None
+                        and decoded.get("acknowledged_type")
+                        == int(acknowledged_type)
+                    ):
+                        return message
+                    continue
                 if message.message_type == MessageType.NACK:
-                    reason = (
-                        message.payload[1] if len(message.payload) > 1 else 0
-                    )
+                    if (
+                        acknowledged_type is not None
+                        and decoded.get("rejected_type")
+                        != int(acknowledged_type)
+                    ):
+                        continue
+                    reason = decoded.get("reason", 0)
                     raise CalibrationError(
                         "firmware rejected the command: "
                         + NACK_REASONS.get(reason, f"reason code {reason}")
                     )
+                if (
+                    report_kind == CalibrationReportKind.ARM
+                    and decoded.get("kind") == "cal_arm"
+                ):
+                    return message
+                if (
+                    report_kind == CalibrationReportKind.DRIVE_COUNTS
+                    and decoded.get("kind") == "cal_drive_counts"
+                ):
+                    return message
+                if (
+                    report_kind == CalibrationReportKind.DRIVE_SPEED
+                    and decoded.get("kind") == "cal_drive_speed"
+                ):
+                    return message
+                if (
+                    report_kind == CalibrationReportKind.SENSOR
+                    and decoded.get("kind") == "cal_sensor"
+                ):
+                    return message
+                if (
+                    report_kind == CalibrationReportKind.SYSTEM
+                    and decoded.get("kind") == "cal_system"
+                ):
+                    return message
             self.sleep(0.01)
-        raise CalibrationError("timed out waiting for the firmware acknowledgement")
+        expected = "firmware acknowledgement"
+        if report_kind is not None:
+            expected = f"{report_kind.name.lower()} calibration report"
+        raise CalibrationError(f"timed out waiting for the {expected}")
 
     def _command_joint(self, joint: int, angle: int) -> None:
-        self._send(
-            MessageType.CALIBRATION_COMMAND, struct.pack("<BB", joint, angle)
+        sequence = self._next_sequence()
+        self._send_raw(encode_cal_arm_move(sequence, joint, angle))
+        self._await_reply(
+            expected_sequence=sequence,
+            acknowledged_type=MessageType.CAL_ARM_MOVE,
         )
-        self._await_reply()
         self.commanded[joint] = angle
         self.out(
             f"{JOINT_NAMES[joint]} (j{joint}) -> {angle} deg"
@@ -232,38 +404,29 @@ class CalibrationSession:
         direction = self.directions.get(joint)
         if center is None or direction is None:
             return
-        self._pump()
-        if self.revision is None:
-            self.out(
-                f"sync deferred for j{joint}: no firmware revision seen yet;"
-                " wait a second and run `sync`"
-            )
-            return
-        data = build_parameter_data(
-            ParameterGroup.SERVO, joint,
-            {
-                "lower": 0, "upper": 180,
-                "center_offset": center - 90, "direction": direction,
-            },
+        sequence = self._next_sequence()
+        packet = encode_cal_joint_reference(
+            sequence,
+            joint,
+            0,
+            180,
+            center - 90,
+            direction,
         )
-        for attempt in (1, 2):
-            self.link.write(encode_parameter_set(
-                self._next_sequence(), ParameterGroup.SERVO, joint,
-                self.revision, data,
-            ))
-            try:
-                self._await_reply()
-            except CalibrationError as error:
-                if "revision mismatch" in str(error) and attempt == 1:
-                    continue
-                self.out(f"warning: firmware sync for j{joint} failed: {error}")
-                return
-            self.synced[joint] = self.revision
-            self.out(
-                f"synced j{joint} center/direction to the firmware"
-                f" (revision {self.revision}); coupling guard now uses it"
+        self.link.write(packet)
+        try:
+            self._await_reply(
+                expected_sequence=sequence,
+                acknowledged_type=MessageType.CAL_SET_JOINT_REFERENCE,
             )
+        except CalibrationError as error:
+            self.out(f"warning: firmware sync for j{joint} failed: {error}")
             return
+        self.synced[joint] = center
+        self.out(
+            f"synced j{joint} center/direction to the firmware;"
+            " coupling guard now uses it"
+        )
 
     def _sync_all(self) -> None:
         pending = False
@@ -330,6 +493,12 @@ class CalibrationSession:
                 self.out("spin stopped (zero frame resumes immediately)")
             elif tokens[0] == "counts":
                 self._show_counts()
+            elif tokens[0] in ("sensors", "sensor"):
+                self._show_sensors()
+            elif tokens[0] in ("stack", "system"):
+                self._show_system()
+            elif tokens[0] == "stress":
+                self._handle_stress(tokens)
             elif tokens[0] == "motor":
                 self._handle_motor_record(tokens)
             elif tokens[0] == "enc":
@@ -368,6 +537,11 @@ class CalibrationSession:
                 raise CalibrationError(f"bad angle {value!r}") from None
         if not 0 <= angle <= 180:
             raise CalibrationError(f"angle {angle} is outside 0-180")
+        if self.commanded[joint] is None and angle != 90:
+            raise CalibrationError(
+                f"the first command for j{joint} must be exactly 90;"
+                " support and align the joint at that raw anchor first"
+            )
         self._command_joint(joint, angle)
         fold = self._fold_estimate()
         if fold is not None:
@@ -401,13 +575,17 @@ class CalibrationSession:
     # -- motor calibration ----------------------------------------------------
 
     def _spin(self, *, mode: int, channel: int, value: int, seconds: float) -> None:
+        sequence = self._next_sequence()
         self._send_raw(
-            encode_drive_calibration(
-                self._next_sequence(), mode, channel, value,
+            encode_cal_drive_spin(
+                sequence, mode, channel, value,
                 int(round(seconds * 1000.0)),
             )
         )
-        self._await_reply()
+        self._await_reply(
+            expected_sequence=sequence,
+            acknowledged_type=MessageType.CAL_DRIVE_SPIN,
+        )
 
     def _send_raw(self, packet: bytes) -> None:
         self.link.write(packet)
@@ -486,32 +664,137 @@ class CalibrationSession:
         )
 
     def _show_counts(self) -> None:
-        self._pump()
+        counts_sequence = self._next_sequence()
+        self._send_raw(encode_cal_read_drive(counts_sequence, 0))
+        self._await_reply(
+            expected_sequence=counts_sequence,
+            report_kind=CalibrationReportKind.DRIVE_COUNTS,
+        )
+        speed_sequence = self._next_sequence()
+        self._send_raw(encode_cal_read_drive(speed_sequence, 1))
+        self._await_reply(
+            expected_sequence=speed_sequence,
+            report_kind=CalibrationReportKind.DRIVE_SPEED,
+        )
         if self.increments is None and self.measured_mm_s is None:
             self.out(
-                "no encoder telemetry yet; wait a second and retry"
+                "no encoder report was returned"
                 " (the motor board must be connected and powered)"
             )
             return
-        lines = ["channel    increment      total   measured mm/s"]
+        lines = [
+            "board channel    raw increment      raw total   counts validity"
+        ]
         for channel in range(4):
-            increment = self.increments[channel] if self.increments else None
-            total = self.totals[channel] if self.totals else None
-            speed = self.measured_mm_s[channel] if self.measured_mm_s else None
+            counts_valid = bool(self.counts_valid_mask & (1 << channel))
+            increment = (
+                self.increments[channel]
+                if self.increments is not None and counts_valid
+                else None
+            )
+            total = (
+                self.totals[channel]
+                if self.totals is not None and counts_valid
+                else None
+            )
             lines.append(
-                f"{channel:>7}"
-                f" {'-' if increment is None else increment:>12}"
-                f" {'-' if total is None else total:>10}"
-                f" {'-' if speed is None else speed:>15}"
+                f"{channel:>13}"
+                f" {'-' if increment is None else increment:>16}"
+                f" {'-' if total is None else total:>14}"
+                f"   {'valid' if counts_valid else 'INVALID - do not calibrate'}"
+            )
+        lines.append("")
+        lines.append("logical wheel    measured mm/s   speed validity")
+        for wheel in range(4):
+            speed_valid = bool(self.speed_valid_mask & (1 << wheel))
+            speed = (
+                self.measured_mm_s[wheel]
+                if self.measured_mm_s is not None and speed_valid
+                else None
+            )
+            lines.append(
+                f"{WHEEL_NAMES[wheel]:>13}"
+                f" {'-' if speed is None else speed:>16}"
+                f"   {'valid' if speed_valid else 'INVALID - do not calibrate'}"
             )
         self.out("\n".join(lines))
 
+    def _show_sensors(self) -> None:
+        sequence = self._send(MessageType.CAL_READ_SENSOR)
+        self._await_reply(
+            expected_sequence=sequence,
+            report_kind=CalibrationReportKind.SENSOR,
+        )
+        if self.sensor_mm is None:
+            self.out("no sensor report was returned")
+            return
+        lines = ["sensor   distance mm   valid"]
+        for index, distance in enumerate(self.sensor_mm):
+            lines.append(
+                f"{index:>6} {distance:>13}   "
+                f"{'yes' if self.sensor_valid_mask & (1 << index) else 'no'}"
+            )
+        self.out("\n".join(lines))
+
+    def _show_system(self) -> None:
+        sequence = self._send(MessageType.CAL_READ_SYSTEM)
+        self._await_reply(
+            expected_sequence=sequence,
+            report_kind=CalibrationReportKind.SYSTEM,
+        )
+        remaining = self.minimum_untouched_stack_bytes
+        if remaining is None:
+            self.out("no system report was returned")
+            return
+        verdict = "PASS" if remaining >= 256 else "FAIL"
+        self.out(
+            f"minimum untouched stack: {remaining} B — {verdict}"
+            " (required >= 256 B)"
+        )
+
+    def _handle_stress(self, tokens: list[str]) -> None:
+        if len(tokens) > 2:
+            raise CalibrationError("expected `stress [seconds]`")
+        try:
+            seconds = (
+                STRESS_DEFAULT_SECONDS
+                if len(tokens) == 1
+                else float(tokens[1])
+            )
+        except ValueError:
+            raise CalibrationError("stress duration must be a number") from None
+        if not 1.0 <= seconds <= STRESS_MAX_SECONDS:
+            raise CalibrationError(
+                f"stress duration must be within 1-{STRESS_MAX_SECONDS:.0f} seconds"
+            )
+        (
+            frames,
+            actual_rate_hz,
+            maximum_interval_ms,
+            missed_slots,
+        ) = self._send_neutral_stream(seconds)
+        self.out(
+            f"sent {frames} neutral control frames; target 30 Hz,"
+            f" actual {actual_rate_hz:.2f} Hz,"
+            f" max interval {maximum_interval_ms:.2f} ms,"
+            f" missed slots {missed_slots}"
+        )
+
     def _show_status(self) -> None:
-        self._pump()
-        lines = ["joint      commanded  telemetry  dir  marks"]
+        if self.hello.get("arm_enabled", True):
+            sequence = self._send(MessageType.CAL_READ_ARM)
+            self._await_reply(
+                expected_sequence=sequence,
+                report_kind=CalibrationReportKind.ARM,
+            )
+        else:
+            self.reported_servo = None
+        lines = ["joint      commanded  reported   dir  marks"]
         for joint in range(JOINT_COUNT):
             commanded = self.commanded[joint]
-            reported = self.telemetry[joint] if self.telemetry else None
+            reported = (
+                self.reported_servo[joint] if self.reported_servo else None
+            )
             marks = ", ".join(
                 f"{name}={angle}"
                 for (mark_joint, name), angle in sorted(self.marks.items())
@@ -671,14 +954,24 @@ class CalibrationSession:
 def run_session(link: Any, *, out: Callable[[str], None] = print) -> int:
     """Blocking REPL over an already-open link. Returns a process exit code."""
     session = CalibrationSession(link, out=out)
-    out("waiting 2 s for the board reset caused by opening the port...")
-    session.start()
-    out("connected; type `help` for commands, `q` to quit")
-    while True:
+    out("waiting 2 s for the HC-06 serial link to stabilize...")
+    try:
         try:
-            line = input("cal> ")
-        except (EOFError, KeyboardInterrupt):
-            out("")
-            return 0
-        if not session.handle_line(line):
-            return 0
+            session.start()
+        except CalibrationError as error:
+            out(f"error: {error}")
+            return 2
+        out(
+            "protocol-v3 calibration firmware verified;"
+            " type `help` for commands"
+        )
+        while True:
+            try:
+                line = input("cal> ")
+            except (EOFError, KeyboardInterrupt):
+                out("")
+                return 0
+            if not session.handle_line(line):
+                return 0
+    finally:
+        session.shutdown()
