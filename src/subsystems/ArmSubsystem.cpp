@@ -392,6 +392,10 @@ bool ArmSubsystem::setCalibrationJoint(
 ) {
     if (joint >= 4 || !calibrated()) return false;
     const float bounded = degrees > 180 ? 180.0F : degrees;
+    // Attaching an unknown servo directly to an arbitrary target can create
+    // an unbounded jump. Every joint must first be held and aligned at the
+    // documented raw 90-degree anchor.
+    if (!attached_[joint] && degrees != 90) return false;
     if (joint == 1 || joint == 2) {
         const uint8_t partner = joint == 1 ? 2 : 1;
         if (attached_[partner]) {
@@ -455,6 +459,8 @@ void ArmSubsystem::calibrationTick(
 void ArmSubsystem::holdLastCommanded() {
     waypointCount_ = 0;
     waypointIndex_ = 0;
+    for (uint8_t joint = 0; joint < 4; ++joint)
+        calibrationPending_[joint] = false;
     goal_ = current_;
     goalGripperDegrees_ = currentGripperDegrees_;
     holding_ = true;
@@ -478,5 +484,8 @@ bool ArmSubsystem::calibrated() const {
 }
 bool ArmSubsystem::faulted() const { return faulted_; }
 bool ArmSubsystem::targetLimited() const { return targetLimitedTicks_ > 0; }
+bool ArmSubsystem::servoTimingActive() const {
+    return attached_[0] || attached_[1] || attached_[2] || attached_[3];
+}
 
 } // namespace robot

@@ -32,6 +32,14 @@ jobs:
       - run: pio test -e native
       - run: >-
           pio run
-          -e robot_closed_loop
-          -e robot_open_loop
+          -e robot
           -e calibration
+      - run: >-
+          pio run
+          -c "${{ github.workspace }}/.github/platformio-variants.ini"
+          -e ci_robot_qualified
+          -e ci_robot_38400
+          -e ci_robot_open
+          -e ci_robot_arm_only
+          -e ci_robot_sensor
+          -e ci_calibration_38400

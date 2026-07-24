@@ -18,15 +18,12 @@ class MotorBoardFrameParser {
         int32_t minimum,
         int32_t maximum
     );
-    static bool parseOne(
-        const char *cursor,
-        int32_t &value,
-        int32_t minimum,
-        int32_t maximum
-    );
 
   private:
-    char buffer_[96];
+    // The longest supported reply is the 73-byte encoder-total frame with
+    // four signed int32 values. Keep a small terminator margin, not a generic
+    // debug-line buffer.
+    char buffer_[80];
     uint16_t overflows_;
     uint8_t length_;
     bool collecting_;

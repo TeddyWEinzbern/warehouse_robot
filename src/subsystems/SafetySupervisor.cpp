@@ -15,7 +15,7 @@ bool SafetySupervisor::neutral(const OperatorControlFrame &frame) {
     return frame.valid && absolute(frame.forward) <= 30 && absolute(frame.turn) <= 30 &&
            absolute(frame.strafe) <= 30 && absolute(frame.armYaw) <= 30 &&
            absolute(frame.armReach) <= 30 && absolute(frame.armHeight) <= 30 &&
-           frame.gripper == 0 && (frame.controlFlags & EStopAsserted) == 0;
+           frame.gripper == 0 && frame.buttons == 0;
 }
 
 void SafetySupervisor::transition(RobotState next) {
@@ -42,25 +42,39 @@ void SafetySupervisor::update(
         faults_ |= drive.faults;
         transition(RobotState::Fault);
     }
-    if ((frame.controlFlags & EStopAsserted) != 0) transition(RobotState::EStop);
+    const bool eStopRequested = (requests.flags & RequestEStop) != 0;
+    const bool disarmRequested = (requests.flags & RequestDisarm) != 0;
+    if (eStopRequested) transition(RobotState::EStop);
 
     if (state_ == RobotState::Boot && platformInitialized && drive.initialized)
         transition(RobotState::Disarmed);
 
-    if ((requests.flags & RequestDisarm) != 0 && state_ == RobotState::Armed)
-        transition(RobotState::Disarmed);
+    if (!eStopRequested && disarmRequested) {
+        // DISARM is dominant over every request that could relax a safety
+        // state. It also requests an immediate stop while already DISARMED,
+        // which cancels bounded calibration motion.
+        immediateStop_ = true;
+        if (state_ == RobotState::Armed)
+            transition(RobotState::Disarmed);
+    }
     if (state_ == RobotState::Armed && !linkAlive_) transition(RobotState::Disarmed);
 
-    if (state_ == RobotState::Disarmed && (requests.flags & RequestArm) != 0 &&
+    if (!eStopRequested && !disarmRequested &&
+        state_ == RobotState::Disarmed &&
+        (requests.flags & RequestArm) != 0 &&
         profileCanArm && drive.feedbackHealthy && linkAlive_ && neutralQualified)
         transition(RobotState::Armed);
 
-    if (state_ == RobotState::EStop && (requests.flags & RequestClearEStop) != 0 &&
-        (frame.controlFlags & EStopAsserted) == 0 && neutralQualified) {
+    if (!eStopRequested && !disarmRequested &&
+        state_ == RobotState::EStop &&
+        (requests.flags & RequestClearEStop) != 0 &&
+        neutralQualified) {
         transition(faults_ == 0 ? RobotState::Disarmed : RobotState::Fault);
     }
 
-    if (state_ == RobotState::Fault && (requests.flags & RequestClearFault) != 0 &&
+    if (!eStopRequested && !disarmRequested &&
+        state_ == RobotState::Fault &&
+        (requests.flags & RequestClearFault) != 0 &&
         drive.feedbackHealthy && neutralQualified) {
         faults_ = 0;
         clearFaultAccepted_ = true;
@@ -70,12 +84,12 @@ void SafetySupervisor::update(
 
 DriveIntent SafetySupervisor::arbitrate(
     const OperatorControlFrame &frame, const AssistOutput &assist,
-    bool cargoMayBeHeld, const RuntimeConfig &runtime
+    bool cargoMayBeHeld
 ) const {
     if (state_ != RobotState::Armed || !linkAlive_)
         return {0, 0, 0, 0, IntentSource::Safety};
     const uint16_t limit = cargoMayBeHeld
-        ? runtime.cargoDriveLimitPermille : runtime.normalDriveLimitPermille;
+        ? config::CargoDriveLimitPermille : config::NormalDriveLimitPermille;
     if (assist.driveActive) {
         DriveIntent result = assist.drive;
         const int16_t blend = static_cast<int16_t>(config::AssistManualBlendThreshold);

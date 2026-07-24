@@ -16,7 +16,6 @@ class AxisConfig:
 @dataclass(frozen=True)
 class RobotControlConfig:
     joystick_index: int = 0
-    rate_hz: float = 20.0
     drive_forward: AxisConfig = field(default_factory=lambda: AxisConfig(1, invert=True))
     drive_turn: AxisConfig = field(default_factory=lambda: AxisConfig(0))
     arm_yaw: AxisConfig = field(default_factory=lambda: AxisConfig(2))
@@ -34,4 +33,3 @@ class RobotControlConfig:
 
 
 CONTROL = RobotControlConfig()
-

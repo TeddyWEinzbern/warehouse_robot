@@ -25,19 +25,11 @@ class MockDriveBackend : public DriveBackend {
     void onMotorDeadline(uint32_t, bool, const RuntimeConfig &) {}
     void onEncoderDeadline(uint32_t, const RuntimeConfig &) {}
     void onEncoderTotalDeadline(uint32_t) {}
-    void onBatteryDeadline(uint32_t) {}
     void stop(uint32_t) { ++stops; stored = {0, 0, 0, 0}; }
-    DriveCapabilities capabilities() const {
-        return {DriveControlMode::None, PwmUnit::Unavailable, false, false, false};
-    }
     const DriveFeedback &feedback() const { return driveFeedback; }
     DriveHealth health(uint32_t) const { return {0, 0, true, true, true}; }
     void clearFaults() {}
-    uint16_t queryTimeouts() const { return 0; }
-    uint16_t rxOverflows() const { return 0; }
-    uint16_t motorCommandAgeMs(uint32_t) const { return 0; }
     uint8_t outstandingQuery() const { return 0; }
-    uint16_t outstandingQueryAgeMs(uint32_t) const { return 0; }
 };
 
 OperatorControlFrame neutralFrame(uint32_t receivedAtMs) {
@@ -88,11 +80,20 @@ void test_scheduler_uses_accumulated_deadlines_without_burst() {
     TEST_ASSERT_EQUAL_UINT32(1000, task.lastLatenessUs());
 }
 
+void test_lightweight_deadline_skips_missed_periods() {
+    PeriodicDeadline task;
+    task.start(1000, 20000, 5000);
+    TEST_ASSERT_FALSE(task.due(5999));
+    TEST_ASSERT_TRUE(task.due(6000));
+    TEST_ASSERT_TRUE(task.due(51000));
+    TEST_ASSERT_EQUAL_UINT32(15000, task.untilDeadlineUs(51000));
+    TEST_ASSERT_FALSE(task.due(51000));
+}
+
 void test_chassis_ramp_and_controlled_zero_crossing() {
     MockDriveBackend backend;
     ChassisSubsystem chassis(backend);
     RuntimeConfig runtime = RuntimeConfig::defaults();
-    runtime.chassis.activeProfile = ResponseProfile::Normal;
     chassis.setDesired({1000, 0, 0, 1000, IntentSource::Operator}, runtime);
     chassis.trajectoryTick(10000, 10000, runtime);
     TEST_ASSERT_EQUAL_INT16(5, chassis.rampedVelocity().longitudinalMmS);
@@ -144,16 +145,14 @@ void test_safety_requires_neutral_then_times_out_immediately() {
     TEST_ASSERT_TRUE(safety.takeImmediateStop());
 }
 
-void test_estop_is_level_triggered_and_clear_never_arms() {
+void test_estop_command_latches_and_clear_never_arms() {
     SafetySupervisor safety;
     OperatorControlFrame frame = neutralFrame(0);
     DriveHealth healthy = {0, 0, true, true, true};
     safety.update(frame, {0}, healthy, true, true, 0);
-    frame.controlFlags = EStopAsserted;
     frame.receivedAtMs = 10;
-    safety.update(frame, {0}, healthy, true, true, 10);
+    safety.update(frame, {RequestEStop}, healthy, true, true, 10);
     TEST_ASSERT_TRUE(safety.emergencyStopped());
-    frame.controlFlags = 0;
     frame.receivedAtMs = 100;
     safety.update(frame, {0}, healthy, true, true, 100);
     frame.receivedAtMs = 600;
@@ -162,22 +161,98 @@ void test_estop_is_level_triggered_and_clear_never_arms() {
                             static_cast<uint8_t>(safety.state()));
 }
 
-void test_runtime_parameter_commit_is_atomic() {
-    RuntimeConfig runtime = RuntimeConfig::defaults();
-    const uint16_t revision = runtime.revision;
-    const uint8_t invalidServo[4] = {170, 10, 0, 1};
-    TEST_ASSERT_FALSE(runtime.applyParameter(
-        ParameterGroup::Servo, 0, invalidServo, sizeof(invalidServo), false
-    ));
-    TEST_ASSERT_EQUAL_UINT16(revision, runtime.revision);
-    TEST_ASSERT_EQUAL_UINT8(
-        robot::config::ServoLowerDegrees[0], runtime.servos[0].lowerDegrees
+void test_simultaneous_estop_and_clear_keeps_estop_latched() {
+    SafetySupervisor safety;
+    OperatorControlFrame frame = neutralFrame(0);
+    DriveHealth healthy = {0, 0, true, true, true};
+    safety.update(frame, {0}, healthy, true, true, 0);
+    frame.receivedAtMs = 600;
+    safety.update(frame, {0}, healthy, true, true, 600);
+    safety.update(
+        frame,
+        {static_cast<uint8_t>(RequestEStop | RequestClearEStop)},
+        healthy, true, true, 600
     );
-    const uint8_t lowProfile = 0;
-    TEST_ASSERT_TRUE(runtime.applyParameter(
-        ParameterGroup::ResponseProfile, 0, &lowProfile, 1, false
+    TEST_ASSERT_TRUE(safety.emergencyStopped());
+}
+
+void test_simultaneous_disarm_and_arm_stays_disarmed() {
+    SafetySupervisor safety;
+    OperatorControlFrame frame = neutralFrame(0);
+    DriveHealth healthy = {0, 0, true, true, true};
+    safety.update(frame, {0}, healthy, true, true, 0);
+    TEST_ASSERT_TRUE(safety.takeImmediateStop());
+    frame.receivedAtMs = 600;
+    safety.update(frame, {RequestArm}, healthy, true, true, 600);
+    TEST_ASSERT_TRUE(safety.armed());
+    TEST_ASSERT_FALSE(safety.takeImmediateStop());
+    safety.update(
+        frame,
+        {static_cast<uint8_t>(RequestDisarm | RequestArm)},
+        healthy, true, true, 600
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RobotState::Disarmed),
+        static_cast<uint8_t>(safety.state())
+    );
+    TEST_ASSERT_TRUE(safety.takeImmediateStop());
+}
+
+void test_disarm_does_not_clear_estop_in_the_same_batch() {
+    SafetySupervisor safety;
+    OperatorControlFrame frame = neutralFrame(0);
+    DriveHealth healthy = {0, 0, true, true, true};
+    safety.update(frame, {RequestEStop}, healthy, true, true, 10);
+    frame.receivedAtMs = 100;
+    safety.update(frame, {0}, healthy, true, true, 100);
+    frame.receivedAtMs = 600;
+    safety.update(
+        frame,
+        {static_cast<uint8_t>(RequestDisarm | RequestClearEStop)},
+        healthy, true, true, 600
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RobotState::EStop),
+        static_cast<uint8_t>(safety.state())
+    );
+}
+
+void test_held_button_cannot_neutral_qualify_for_arm() {
+    SafetySupervisor safety;
+    OperatorControlFrame frame = neutralFrame(0);
+    DriveHealth healthy = {0, 0, true, true, true};
+    safety.update(frame, {0}, healthy, true, true, 0);
+    frame.buttons = PresetLeft;
+    frame.receivedAtMs = 600;
+    safety.update(frame, {RequestArm}, healthy, true, true, 600);
+    TEST_ASSERT_FALSE(safety.armed());
+    frame.buttons = 0;
+    frame.receivedAtMs = 700;
+    safety.update(frame, {0}, healthy, true, true, 700);
+    frame.receivedAtMs = 1200;
+    safety.update(frame, {RequestArm}, healthy, true, true, 1200);
+    TEST_ASSERT_TRUE(safety.armed());
+}
+
+void test_calibration_servo_reference_validation_is_atomic() {
+    RuntimeConfig runtime = RuntimeConfig::defaults();
+    const ServoCalibration original = runtime.servos[0];
+    TEST_ASSERT_FALSE(runtime.setCalibrationServoReference(
+        0, 170, 180, 0, 1
     ));
-    TEST_ASSERT_EQUAL_UINT16(revision + 1, runtime.revision);
+    TEST_ASSERT_EQUAL_UINT8(
+        original.lowerDegrees, runtime.servos[0].lowerDegrees
+    );
+    TEST_ASSERT_EQUAL_INT8(
+        original.direction, runtime.servos[0].direction
+    );
+    TEST_ASSERT_TRUE(runtime.setCalibrationServoReference(
+        0, 10, 170, 5, -1
+    ));
+    TEST_ASSERT_EQUAL_UINT8(10, runtime.servos[0].lowerDegrees);
+    TEST_ASSERT_EQUAL_UINT8(170, runtime.servos[0].upperDegrees);
+    TEST_ASSERT_EQUAL_INT8(5, runtime.servos[0].centerOffsetDegrees);
+    TEST_ASSERT_EQUAL_INT8(-1, runtime.servos[0].direction);
 }
 
 void test_motor_parser_resynchronizes_and_bounds_frames() {
@@ -196,6 +271,18 @@ void test_motor_parser_resynchronizes_and_bounds_frames() {
         static_cast<uint8_t>(result)
     );
     TEST_ASSERT_EQUAL_STRING("$MOTOR_4CH_Encoder_20ms:1,-2,3,-4!", parser.frame());
+
+    const char longest[] =
+        "$MOTOR_4CH_Encoder_Total:"
+        "-2147483648,-2147483648,-2147483648,-2147483648!";
+    static_assert(sizeof(longest) <= 80, "motor parser no longer fits totals");
+    for (uint8_t i = 0; longest[i] != '\0'; ++i)
+        result = parser.feed(longest[i]);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(MotorBoardFeedResult::Complete),
+        static_cast<uint8_t>(result)
+    );
+    TEST_ASSERT_EQUAL_STRING(longest, parser.frame());
 
     parser.feed('$');
     for (uint8_t i = 0; i < 100; ++i) parser.feed('9');
@@ -225,9 +312,6 @@ void test_motor_numeric_parser_rejects_malformed_and_out_of_range_values() {
     TEST_ASSERT_FALSE(MotorBoardFrameParser::parseFour(
         "1,2,3,32768!", values, -32768, 32767
     ));
-    int32_t battery = 0;
-    TEST_ASSERT_TRUE(MotorBoardFrameParser::parseOne("65535!", battery, 0, 65535));
-    TEST_ASSERT_FALSE(MotorBoardFrameParser::parseOne("65536!", battery, 0, 65535));
 }
 
 int main(int, char **) {
@@ -236,11 +320,16 @@ int main(int, char **) {
     RUN_TEST(test_mecanum_proportional_scaling_preserves_ratios);
     RUN_TEST(test_arm_reachable_and_unreachable);
     RUN_TEST(test_scheduler_uses_accumulated_deadlines_without_burst);
+    RUN_TEST(test_lightweight_deadline_skips_missed_periods);
     RUN_TEST(test_chassis_ramp_and_controlled_zero_crossing);
     RUN_TEST(test_force_zero_bypasses_ramp);
     RUN_TEST(test_safety_requires_neutral_then_times_out_immediately);
-    RUN_TEST(test_estop_is_level_triggered_and_clear_never_arms);
-    RUN_TEST(test_runtime_parameter_commit_is_atomic);
+    RUN_TEST(test_estop_command_latches_and_clear_never_arms);
+    RUN_TEST(test_simultaneous_estop_and_clear_keeps_estop_latched);
+    RUN_TEST(test_simultaneous_disarm_and_arm_stays_disarmed);
+    RUN_TEST(test_disarm_does_not_clear_estop_in_the_same_batch);
+    RUN_TEST(test_held_button_cannot_neutral_qualify_for_arm);
+    RUN_TEST(test_calibration_servo_reference_validation_is_atomic);
     RUN_TEST(test_motor_parser_resynchronizes_and_bounds_frames);
     RUN_TEST(test_motor_numeric_parser_rejects_malformed_and_out_of_range_values);
     return UNITY_END();

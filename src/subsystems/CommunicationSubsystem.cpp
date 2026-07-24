@@ -4,8 +4,13 @@
 
 namespace robot {
 namespace {
-constexpr uint8_t ProtocolVersion = 2;
-constexpr uint8_t MaximumPayload = 27;
+constexpr uint8_t FastClassMask = 0xC0;
+constexpr uint8_t FastSequenceMask = 0x3F;
+constexpr uint8_t ControlClass = 0x40;
+constexpr uint8_t EStopClass = 0x80;
+constexpr uint8_t ControlRawLength = 9;
+constexpr uint8_t EStopRawLength = 2;
+constexpr uint8_t AllowedButtons = 0x3F;
 
 int16_t readI16(const uint8_t *data) {
     return static_cast<int16_t>(
@@ -18,21 +23,13 @@ uint16_t readU16(const uint8_t *data) {
     return static_cast<uint16_t>(data[0]) |
            (static_cast<uint16_t>(data[1]) << 8);
 }
-
-void saturatingIncrement(uint16_t &value) {
-    if (value != 65535U) ++value;
-}
-
-bool validAxis(int16_t value) { return value >= -1000 && value <= 1000; }
 } // namespace
 
 CommunicationSubsystem::CommunicationSubsystem()
-    : latest_({}), requests_({0}), parameter_({}), calibration_({}),
-      driveCalibration_({}),
-      previousButtons_(0), rxOverflows_(0), malformedFrames_(0),
-      snapshotSequence_(0), encodedLength_(0), transmit_{},
-      transmitLength_(0), transmitOffset_(0), txDrops_(0),
-      snapshotRequested_(false) {}
+    : latest_({}), requests_({0}), armMove_({}), jointReference_({}),
+      driveCalibration_({}), calibrationRead_({}), previousButtons_(0),
+      encoded_{}, raw_{}, transmit_{}, encodedLength_(0),
+      transmitLength_(0), transmitOffset_(0), discarding_(false) {}
 
 uint8_t CommunicationSubsystem::crc8(const uint8_t *data, uint8_t length) {
     uint8_t crc = 0;
@@ -97,146 +94,179 @@ uint8_t CommunicationSubsystem::cobsEncode(
     return written;
 }
 
-void CommunicationSubsystem::markMalformed() {
-    saturatingIncrement(malformedFrames_);
+int16_t CommunicationSubsystem::expandAxis(uint8_t value) {
+    return static_cast<int16_t>(static_cast<int8_t>(value)) * 10;
 }
 
-void CommunicationSubsystem::acceptFrame(
-    OperatorControlFrame &frame, uint32_t nowMs
+int16_t CommunicationSubsystem::expandTernary(uint8_t code) {
+    if (code == 1) return -1000;
+    if (code == 2) return 1000;
+    return 0;
+}
+
+void CommunicationSubsystem::acceptControl(
+    const uint8_t *raw, uint32_t nowMs
 ) {
-    frame.pressed = static_cast<uint16_t>(frame.buttons & ~previousButtons_);
-    previousButtons_ = frame.buttons;
+    for (uint8_t index = 1; index <= 5; ++index) {
+        const int8_t axis = static_cast<int8_t>(raw[index]);
+        if (axis < -100 || axis > 100) return;
+    }
+    const uint8_t discrete = raw[6];
+    const uint8_t heightCode = discrete & 0x03U;
+    const uint8_t gripperCode = (discrete >> 2) & 0x03U;
+    if ((discrete & 0xF0U) != 0 || heightCode == 3 || gripperCode == 3 ||
+        (raw[7] & ~AllowedButtons) != 0)
+        return;
+
+    OperatorControlFrame frame = {};
+    frame.forward = expandAxis(raw[1]);
+    frame.turn = expandAxis(raw[2]);
+    frame.strafe = expandAxis(raw[3]);
+    frame.armYaw = expandAxis(raw[4]);
+    frame.armReach = expandAxis(raw[5]);
+    frame.armHeight = expandTernary(heightCode);
+    frame.gripper = static_cast<int8_t>(expandTernary(gripperCode) / 1000);
+    frame.buttons = raw[7];
+    frame.pressed = static_cast<uint16_t>(raw[7] & ~previousButtons_);
+    frame.sequence = raw[0] & FastSequenceMask;
     frame.receivedAtMs = nowMs;
     frame.valid = true;
+    previousButtons_ = raw[7];
     latest_ = frame;
 }
 
-void CommunicationSubsystem::finishFrame(uint32_t nowMs) {
-    uint8_t raw[32];
-    const uint8_t length = cobsDecode(encoded_, encodedLength_, raw, sizeof(raw));
-    encodedLength_ = 0;
-    if (length < 5 || raw[0] != ProtocolVersion || raw[3] > MaximumPayload ||
-        length != static_cast<uint8_t>(raw[3] + 5U) ||
-        crc8(raw, static_cast<uint8_t>(length - 1U)) != raw[length - 1U]) {
-        markMalformed();
+void CommunicationSubsystem::acceptGeneric(uint8_t length) {
+    if (length < 5 || raw_[0] != ProtocolVersion ||
+        raw_[3] > MaximumPayload ||
+        length != static_cast<uint8_t>(raw_[3] + 5U))
         return;
-    }
-    const MessageType type = static_cast<MessageType>(raw[1]);
-    const uint8_t sequence = raw[2];
-    const uint8_t payloadLength = raw[3];
-    const uint8_t *payload = raw + 4;
+
+    const MessageType type = static_cast<MessageType>(raw_[1]);
+    const uint8_t sequence = raw_[2];
+    const uint8_t payloadLength = raw_[3];
+    const uint8_t *payload = raw_ + 4;
     switch (type) {
-        case MessageType::Control: {
-            if (payloadLength != 16) { markMalformed(); return; }
-            OperatorControlFrame frame = {};
-            frame.forward = readI16(payload);
-            frame.turn = readI16(payload + 2);
-            frame.strafe = readI16(payload + 4);
-            frame.armYaw = readI16(payload + 6);
-            frame.armReach = readI16(payload + 8);
-            frame.armHeight = readI16(payload + 10);
-            frame.gripper = static_cast<int8_t>(payload[12]);
-            frame.buttons = readU16(payload + 13);
-            frame.controlFlags = payload[15];
-            frame.sequence = sequence;
-            if (!validAxis(frame.forward) || !validAxis(frame.turn) ||
-                !validAxis(frame.strafe) || !validAxis(frame.armYaw) ||
-                !validAxis(frame.armReach) || !validAxis(frame.armHeight) ||
-                frame.gripper < -1 || frame.gripper > 1 ||
-                (frame.controlFlags & ~EStopAsserted) != 0) {
-                markMalformed();
-                return;
-            }
-            acceptFrame(frame, nowMs);
-            break;
-        }
         case MessageType::Hello:
-            if (payloadLength != 0) { markMalformed(); return; }
-            requests_.flags |= RequestHello;
+            if (payloadLength == 0) requests_.flags |= RequestHello;
             break;
         case MessageType::Arm:
-            if (payloadLength != 0) { markMalformed(); return; }
-            requests_.flags |= RequestArm;
+            if (payloadLength == 0) requests_.flags |= RequestArm;
             break;
         case MessageType::Disarm:
-            if (payloadLength != 0) { markMalformed(); return; }
-            requests_.flags |= RequestDisarm;
+            if (payloadLength == 0) requests_.flags |= RequestDisarm;
             break;
         case MessageType::ClearEStop:
-            if (payloadLength != 0) { markMalformed(); return; }
-            requests_.flags |= RequestClearEStop;
+            if (payloadLength == 0) requests_.flags |= RequestClearEStop;
             break;
         case MessageType::ClearFault:
-            if (payloadLength != 0) { markMalformed(); return; }
-            requests_.flags |= RequestClearFault;
+            if (payloadLength == 0) requests_.flags |= RequestClearFault;
             break;
-        case MessageType::ParameterSet:
-            if (payloadLength < 4 || parameter_.valid) { markMalformed(); return; }
-            parameter_.valid = true;
-            parameter_.group = static_cast<ParameterGroup>(payload[0]);
-            parameter_.index = payload[1];
-            parameter_.expectedRevision = readU16(payload + 2);
-            parameter_.length = static_cast<uint8_t>(payloadLength - 4U);
-            parameter_.sequence = sequence;
-            memcpy(parameter_.data, payload + 4, parameter_.length);
+        case MessageType::CalibrationArmMove:
+            if (payloadLength == 2 && !armMove_.valid) {
+                armMove_ = {true, payload[0], payload[1], sequence};
+            }
             break;
-        case MessageType::CalibrationCommand:
-            if (payloadLength != 2 || calibration_.valid) { markMalformed(); return; }
-            calibration_ = {true, payload[0], payload[1], sequence};
+        case MessageType::CalibrationSetJointReference:
+            if (payloadLength == 5 && !jointReference_.valid) {
+                jointReference_ = {
+                    true, payload[0], payload[1], payload[2],
+                    static_cast<int8_t>(payload[3]),
+                    static_cast<int8_t>(payload[4]), sequence
+                };
+            }
             break;
-        case MessageType::DriveCalibrationCommand:
-            if (payloadLength != 6 || driveCalibration_.valid) { markMalformed(); return; }
-            driveCalibration_.valid = true;
-            driveCalibration_.mode = payload[0];
-            driveCalibration_.channel = payload[1];
-            driveCalibration_.value = readI16(payload + 2);
-            driveCalibration_.durationMs = readU16(payload + 4);
-            driveCalibration_.sequence = sequence;
+        case MessageType::CalibrationDriveSpin:
+            if (payloadLength == 6 && !driveCalibration_.valid) {
+                driveCalibration_ = {
+                    true, payload[0], payload[1], readI16(payload + 2),
+                    readU16(payload + 4), sequence
+                };
+            }
             break;
-        case MessageType::ParameterSnapshotRequest:
-            if (payloadLength != 0) { markMalformed(); return; }
-            snapshotRequested_ = true;
-            snapshotSequence_ = sequence;
+        case MessageType::CalibrationReadDrive:
+            if (payloadLength == 1 && payload[0] <= 1 &&
+                !calibrationRead_.valid) {
+                calibrationRead_ = {true, type, payload[0], sequence};
+            }
             break;
+        case MessageType::CalibrationReadSensor:
+        case MessageType::CalibrationReadArm:
+            if (payloadLength == 0 && !calibrationRead_.valid) {
+                calibrationRead_ = {true, type, 0, sequence};
+            }
+            break;
+#if ROBOT_CALIBRATION
+        case MessageType::CalibrationReadSystem:
+            if (payloadLength == 0 && !calibrationRead_.valid) {
+                calibrationRead_ = {true, type, 0, sequence};
+            }
+            break;
+#endif
         default:
             break;
     }
 }
 
+void CommunicationSubsystem::finishFrame(uint32_t nowMs) {
+    const uint8_t length = cobsDecode(
+        encoded_, encodedLength_, raw_, sizeof(raw_)
+    );
+    encodedLength_ = 0;
+    if (length == 0 ||
+        crc8(raw_, static_cast<uint8_t>(length - 1U)) != raw_[length - 1U])
+        return;
+
+    const uint8_t frameClass = raw_[0] & FastClassMask;
+    if (frameClass == ControlClass) {
+        if (length == ControlRawLength) acceptControl(raw_, nowMs);
+        return;
+    }
+    if (frameClass == EStopClass) {
+        if (length == EStopRawLength) requests_.flags |= RequestEStop;
+        return;
+    }
+    acceptGeneric(length);
+}
+
 void CommunicationSubsystem::poll(Stream &stream, uint32_t nowMs) {
     uint8_t processed = 0;
-    while (stream.available() > 0 && processed++ < 48) {
+    while (stream.available() > 0 && processed++ < 32) {
         const uint8_t value = static_cast<uint8_t>(stream.read());
         if (value == 0) {
+            if (discarding_) {
+                discarding_ = false;
+                encodedLength_ = 0;
+                continue;
+            }
             if (encodedLength_ > 0) finishFrame(nowMs);
+        } else if (discarding_) {
+            continue;
         } else if (encodedLength_ < sizeof(encoded_)) {
             encoded_[encodedLength_++] = value;
         } else {
             encodedLength_ = 0;
-            saturatingIncrement(rxOverflows_);
+            discarding_ = true;
         }
     }
 }
 
 bool CommunicationSubsystem::sendFrame(
-    Stream &stream, MessageType type, uint8_t sequence,
+    MessageType type, uint8_t sequence,
     const uint8_t *payload, uint8_t payloadLength
 ) {
-    (void)stream;
-    if (payloadLength > MaximumPayload) return false;
-    if (transmitLength_ != 0) {
-        saturatingIncrement(txDrops_);
-        return false;
-    }
-    uint8_t raw[32];
-    raw[0] = ProtocolVersion;
-    raw[1] = static_cast<uint8_t>(type);
-    raw[2] = sequence;
-    raw[3] = payloadLength;
-    if (payloadLength > 0 && payload != 0) memcpy(raw + 4, payload, payloadLength);
-    raw[4 + payloadLength] = crc8(raw, static_cast<uint8_t>(4 + payloadLength));
+    if (payloadLength > MaximumPayload || transmitLength_ != 0) return false;
+    raw_[0] = ProtocolVersion;
+    raw_[1] = static_cast<uint8_t>(type);
+    raw_[2] = sequence;
+    raw_[3] = payloadLength;
+    if (payloadLength > 0 && payload != 0)
+        memcpy(raw_ + 4, payload, payloadLength);
+    raw_[4 + payloadLength] = crc8(
+        raw_, static_cast<uint8_t>(4 + payloadLength)
+    );
     const uint8_t encodedLength = cobsEncode(
-        raw, static_cast<uint8_t>(5 + payloadLength), transmit_, sizeof(transmit_) - 1
+        raw_, static_cast<uint8_t>(5 + payloadLength),
+        transmit_, sizeof(transmit_) - 1
     );
     if (encodedLength == 0) return false;
     transmit_[encodedLength] = 0;
@@ -246,22 +276,19 @@ bool CommunicationSubsystem::sendFrame(
 }
 
 bool CommunicationSubsystem::sendAck(
-    Stream &stream, uint8_t sequence, MessageType acknowledged, uint16_t revision
+    uint8_t sequence, MessageType acknowledged
 ) {
-    const uint8_t payload[3] = {
-        static_cast<uint8_t>(acknowledged), static_cast<uint8_t>(revision),
-        static_cast<uint8_t>(revision >> 8)
-    };
-    return sendFrame(stream, MessageType::Ack, sequence, payload, sizeof(payload));
+    const uint8_t payload = static_cast<uint8_t>(acknowledged);
+    return sendFrame(MessageType::Ack, sequence, &payload, 1);
 }
 
 bool CommunicationSubsystem::sendNack(
-    Stream &stream, uint8_t sequence, MessageType rejected, NackReason reason
+    uint8_t sequence, MessageType rejected, NackReason reason
 ) {
     const uint8_t payload[2] = {
         static_cast<uint8_t>(rejected), static_cast<uint8_t>(reason)
     };
-    return sendFrame(stream, MessageType::Nack, sequence, payload, sizeof(payload));
+    return sendFrame(MessageType::Nack, sequence, payload, sizeof(payload));
 }
 
 const OperatorControlFrame &CommunicationSubsystem::latest() const {
@@ -274,38 +301,43 @@ ControlRequests CommunicationSubsystem::takeRequests() {
     return result;
 }
 
-bool CommunicationSubsystem::takeParameter(PendingParameter &parameter) {
-    if (!parameter_.valid) return false;
-    parameter = parameter_;
-    parameter_.valid = false;
+bool CommunicationSubsystem::takeArmMove(PendingArmMove &command) {
+    if (!armMove_.valid) return false;
+    command = armMove_;
+    armMove_.valid = false;
     return true;
 }
 
-bool CommunicationSubsystem::takeCalibration(PendingCalibration &calibration) {
-    if (!calibration_.valid) return false;
-    calibration = calibration_;
-    calibration_.valid = false;
+bool CommunicationSubsystem::takeJointReference(
+    PendingJointReference &command
+) {
+    if (!jointReference_.valid) return false;
+    command = jointReference_;
+    jointReference_.valid = false;
     return true;
 }
 
-bool CommunicationSubsystem::takeDriveCalibration(PendingDriveCalibration &calibration) {
+bool CommunicationSubsystem::takeDriveCalibration(
+    PendingDriveCalibration &command
+) {
     if (!driveCalibration_.valid) return false;
-    calibration = driveCalibration_;
+    command = driveCalibration_;
     driveCalibration_.valid = false;
     return true;
 }
 
-bool CommunicationSubsystem::takeSnapshotRequest(uint8_t &sequence) {
-    if (!snapshotRequested_) return false;
-    snapshotRequested_ = false;
-    sequence = snapshotSequence_;
+bool CommunicationSubsystem::takeCalibrationRead(
+    PendingCalibrationRead &request
+) {
+    if (!calibrationRead_.valid) return false;
+    request = calibrationRead_;
+    calibrationRead_.valid = false;
     return true;
 }
 
-uint16_t CommunicationSubsystem::rxOverflows() const { return rxOverflows_; }
-uint16_t CommunicationSubsystem::malformedFrames() const { return malformedFrames_; }
-
-void CommunicationSubsystem::pumpTransmit(Stream &stream, uint8_t byteBudget) {
+void CommunicationSubsystem::pumpTransmit(
+    Stream &stream, uint8_t byteBudget
+) {
     while (transmitLength_ != 0 && byteBudget-- > 0) {
         if (stream.write(transmit_[transmitOffset_]) != 1) return;
         ++transmitOffset_;
@@ -316,7 +348,12 @@ void CommunicationSubsystem::pumpTransmit(Stream &stream, uint8_t byteBudget) {
     }
 }
 
-bool CommunicationSubsystem::transmitIdle() const { return transmitLength_ == 0; }
-uint16_t CommunicationSubsystem::txDrops() const { return txDrops_; }
+bool CommunicationSubsystem::transmitIdle() const {
+    return transmitLength_ == 0;
+}
+
+bool CommunicationSubsystem::receiveIdle() const {
+    return encodedLength_ == 0 && !discarding_;
+}
 
 } // namespace robot
