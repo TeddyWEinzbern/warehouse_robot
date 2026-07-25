@@ -69,7 +69,14 @@ void SafetySupervisor::update(
         state_ == RobotState::EStop &&
         (requests.flags & RequestClearEStop) != 0 &&
         neutralQualified) {
-        transition(faults_ == 0 ? RobotState::Disarmed : RobotState::Fault);
+        if (faults_ != 0)
+            transition(RobotState::Fault);
+        else
+            transition(
+                platformInitialized && drive.initialized
+                    ? RobotState::Disarmed
+                    : RobotState::Boot
+            );
     }
 
     if (!eStopRequested && !disarmRequested &&

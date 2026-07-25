@@ -110,6 +110,11 @@ Notes:
 - Protocol-v3 calibration traffic is request/reply. Encoder and sensor reports
   are returned only when the tool explicitly asks for them; there is no
   background detailed telemetry stream.
+- If the motor board is absent or slow at startup, the firmware stays in Boot
+  and continuously commands zero motor output. It waits up to 150 ms for the
+  vendor-prefixed encoder reply, then retries the complete board
+  initialization every 10 seconds. Reconnect the board and wait for the next
+  retry; resetting the Uno or clearing a fault is not required.
 
 ## Chapter 2 — Calibrate the arm
 
@@ -393,6 +398,7 @@ send ClearFault before ARMing again.
 | `blocked: shoulder/elbow coupling guard...` | Protection, not a fault. Back off, or move the other joint first (chapter 2.3) |
 | Guard behaves backwards (blocks obviously-safe poses / allows deep folds) | j1/j2 not yet synced, or a wrong `dir`. Mark center + set dir for both, watch for `synced j1`/`synced j2`, re-test the direction if it persists |
 | `invalid state` or `disabled` on `j`/`m`/`v` commands | Wrong firmware (must be `calibration`), not DISARMED, or the matching `ROBOT_ARM_ENABLED` / `ROBOT_DRIVE_ENABLED` flag is `0`; for motor commands also check board power and D0/D1 |
+| Calibration remains in Boot with the motor board disconnected | Fail-closed initialization is active. Motor output remains zero; reconnect D0/D1 and board power, then allow up to 10 seconds for the automatic retry |
 | Motor spin acknowledged but nothing turns | Motor power supply off, or that channel has no motor plugged in |
 | `counts` never returns a drive report | `ROBOT_DRIVE_ENABLED=0`, motor-board D0/D1 disconnected, or board unpowered |
 | Arm goes limp / robot resets when you plug USB | Expected: USB opening resets the Uno. Do the whole session over the A4/A5 link; USB is only for flashing |

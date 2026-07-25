@@ -79,7 +79,9 @@ constexpr uint32_t HostControlWireTimeUs =
 constexpr uint32_t HostTransmitWindowEndUs =
     HostControlPeriodUs - HostControlWireTimeUs - 2000UL;
 constexpr uint32_t EncoderTotalPeriodUs = 500000UL;
-constexpr uint32_t QueryTimeoutUs = 15000UL;
+constexpr uint32_t MotorBoardQueryTimeoutMs = 15UL;
+constexpr uint32_t MotorBoardInitializationTimeoutMs = 150UL;
+constexpr uint32_t MotorBoardInitializationRetryMs = 10000UL;
 constexpr uint32_t FeedbackStaleMs = 100UL;
 constexpr uint32_t SensorStaleMs = 300UL;
 constexpr uint32_t AssistTimeoutMs = 5000UL;
@@ -156,8 +158,8 @@ constexpr int8_t ServoDirectionSign[4] = {1, -1, 1, 1};
 // 3 rear-right. "Board channel" is the motor/encoder index (0..3 = M1..M4)
 // on the UART motor driver board. The `calibrate` REPL's `export` command
 // prints this whole block ready to paste.
-constexpr int8_t MotorCommandMap[4] = {0, 1, 2, 3};
-constexpr int8_t MotorCommandSign[4] = {1, 1, 1, 1};
+constexpr int8_t MotorCommandMap[4] = {0, 2, 1, 3};
+constexpr int8_t MotorCommandSign[4] = {1, -1, -1, 1};
 constexpr int8_t EncoderChannelMap[4] = {0, 1, 2, 3};
 constexpr int8_t EncoderDirectionSign[4] = {-1, 1, -1, 1};
 constexpr uint16_t WheelDiameterMm = 60;

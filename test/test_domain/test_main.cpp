@@ -161,6 +161,33 @@ void test_estop_command_latches_and_clear_never_arms() {
                             static_cast<uint8_t>(safety.state()));
 }
 
+void test_estop_clear_returns_to_boot_until_drive_initializes() {
+    SafetySupervisor safety;
+    OperatorControlFrame frame = neutralFrame(0);
+    DriveHealth waiting = {0, 0, false, false, false};
+    safety.update(frame, {0}, waiting, true, true, 0);
+    safety.update(frame, {RequestEStop}, waiting, true, true, 10);
+    TEST_ASSERT_TRUE(safety.emergencyStopped());
+
+    frame.receivedAtMs = 100;
+    safety.update(frame, {0}, waiting, true, true, 100);
+    frame.receivedAtMs = 600;
+    safety.update(
+        frame, {RequestClearEStop}, waiting, true, true, 600
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RobotState::Boot),
+        static_cast<uint8_t>(safety.state())
+    );
+
+    const DriveHealth initialized = {0, 0, true, false, false};
+    safety.update(frame, {0}, initialized, true, true, 601);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RobotState::Disarmed),
+        static_cast<uint8_t>(safety.state())
+    );
+}
+
 void test_simultaneous_estop_and_clear_keeps_estop_latched() {
     SafetySupervisor safety;
     OperatorControlFrame frame = neutralFrame(0);
@@ -255,6 +282,28 @@ void test_calibration_servo_reference_validation_is_atomic() {
     TEST_ASSERT_EQUAL_INT8(-1, runtime.servos[0].direction);
 }
 
+void test_runtime_defaults_keep_calibrated_motor_mapping() {
+    const RuntimeConfig runtime = RuntimeConfig::defaults();
+    const int8_t commandMap[4] = {0, 2, 1, 3};
+    const int8_t commandSigns[4] = {1, -1, -1, 1};
+    const int8_t encoderMap[4] = {0, 1, 2, 3};
+    const int8_t encoderSigns[4] = {-1, 1, -1, 1};
+    for (uint8_t index = 0; index < 4; ++index) {
+        TEST_ASSERT_EQUAL_INT8(
+            commandMap[index], runtime.encoder.commandMap[index]
+        );
+        TEST_ASSERT_EQUAL_INT8(
+            commandSigns[index], runtime.encoder.commandSigns[index]
+        );
+        TEST_ASSERT_EQUAL_INT8(
+            encoderMap[index], runtime.encoder.channelMap[index]
+        );
+        TEST_ASSERT_EQUAL_INT8(
+            encoderSigns[index], runtime.encoder.signs[index]
+        );
+    }
+}
+
 void test_motor_parser_resynchronizes_and_bounds_frames() {
     MotorBoardFrameParser parser;
     const char noise[] = "cmdOkgarbage";
@@ -325,11 +374,13 @@ int main(int, char **) {
     RUN_TEST(test_force_zero_bypasses_ramp);
     RUN_TEST(test_safety_requires_neutral_then_times_out_immediately);
     RUN_TEST(test_estop_command_latches_and_clear_never_arms);
+    RUN_TEST(test_estop_clear_returns_to_boot_until_drive_initializes);
     RUN_TEST(test_simultaneous_estop_and_clear_keeps_estop_latched);
     RUN_TEST(test_simultaneous_disarm_and_arm_stays_disarmed);
     RUN_TEST(test_disarm_does_not_clear_estop_in_the_same_batch);
     RUN_TEST(test_held_button_cannot_neutral_qualify_for_arm);
     RUN_TEST(test_calibration_servo_reference_validation_is_atomic);
+    RUN_TEST(test_runtime_defaults_keep_calibrated_motor_mapping);
     RUN_TEST(test_motor_parser_resynchronizes_and_bounds_frames);
     RUN_TEST(test_motor_numeric_parser_rejects_malformed_and_out_of_range_values);
     return UNITY_END();

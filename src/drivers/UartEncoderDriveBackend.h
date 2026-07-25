@@ -35,7 +35,8 @@ class UartEncoderDriveBackend : public DriveBackend {
 
   private:
     enum class InitStage : uint8_t {
-        Settling, MotorType, EncoderPolarity, QualificationDelay, Qualifying, Ready
+        Settling, MotorType, EncoderPolarity, QualificationDelay,
+        Qualifying, RetryWait, Ready
     };
     enum class QueryType : uint8_t { None, EncoderIncrement, EncoderTotal };
 
@@ -56,7 +57,6 @@ class UartEncoderDriveBackend : public DriveBackend {
     int16_t previousTargetMmS_[4];
     int16_t previousMeasuredMmS_[4];
     uint16_t faults_;
-    uint8_t consecutiveValid_;
     uint8_t consecutiveMalformed_;
     uint8_t implausibleSamples_;
     uint8_t unchangedTotalFrames_[4];
@@ -77,6 +77,8 @@ class UartEncoderDriveBackend : public DriveBackend {
 
     bool tryWrite(const char *data, uint8_t length);
     bool tryWriteLiteral(const __FlashStringHelper *value, uint8_t length);
+    void startInitializationAttempt(uint32_t nowMs);
+    void scheduleInitializationRetry(uint32_t nowMs);
     void serviceInitialization(uint32_t nowMs);
     void serviceTransmit(uint32_t nowMs, const RuntimeConfig &runtime);
     void serviceQuery(uint32_t nowMs);

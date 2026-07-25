@@ -160,7 +160,7 @@ Critical `state` values are `0` Boot, `1` Disarmed, `2` Armed, `3` E-stop, and
 | Bit | Fault |
 | ---: | --- |
 | 0 | scheduler overrun |
-| 1 | drive initialization |
+| 1 | drive initialization (reserved; retryable startup timeout does not set it) |
 | 2 | encoder stale |
 | 3 | encoder malformed |
 | 4 | encoder implausible |
@@ -402,6 +402,15 @@ The motor board is independent of the HC-06 host protocol:
 - encoder-total requests are serialized through the same parser.
 - DISARM, link loss, E-stop, disabled drive, and drive faults converge on
   `$Car:0,0,0,0!`.
+- Startup sends the vendor motor-type and encoder-polarity commands, then
+  makes one encoder-increment request. As in the vendor example, the first
+  complete reply beginning `$MOTOR_4CH_Encoder_20ms:` proves that the board
+  is present; parsing its four numeric fields separately determines whether
+  feedback is ready.
+- The startup reply window is 150 ms. A timeout remains fail-closed in Boot,
+  repeats the zero-motor frame, and retries the complete initialization
+  sequence after 10 seconds. It does not require a reset or latch a
+  clear-before-retry initialization fault.
 
 The driver-board UART remains compiled and allocated in shipped Uno images.
 `ROBOT_DRIVE_ENABLED=0` prevents initialization, polling, and commands; it does
