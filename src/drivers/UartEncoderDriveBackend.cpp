@@ -11,6 +11,9 @@ const char ClosedLoopPrefix[] PROGMEM = "$Car:";
 const char IncrementPrefix[] PROGMEM = "$MOTOR_4CH_Encoder_20ms:";
 #if ROBOT_CALIBRATION
 const char TotalPrefix[] PROGMEM = "$MOTOR_4CH_Encoder_Total:";
+const char MotorTypeAckPrefix[] PROGMEM = "$MOTOR_4CH_SET_OK:";
+const char PolarityAckPrefix[] PROGMEM =
+    "$MOTOR_4CH_SET_ENCPDER_POLARITY_OK:";
 #endif
 
 int32_t absolute32(int32_t value) { return value < 0 ? -value : value; }
@@ -28,7 +31,8 @@ UartEncoderDriveBackend::UartEncoderDriveBackend(HardwareSerial &serial)
       initStage_(InitStage::Settling), outstanding_(QueryType::None),
       startedAtMs_(0), querySentAtMs_(0), lastZeroAtMs_(0),
 #if ROBOT_CALIBRATION
-      totalDue_(false),
+      totalDue_(false), receivedBytes_(0), completeFrames_(0),
+      incrementFrames_(0), configurationAckMask_(0),
 #endif
       badSignSinceMs_{0, 0, 0, 0}, stallSinceMs_{0, 0, 0, 0},
       mismatchSinceMs_{0, 0, 0, 0}, motionStartedAtMs_{0, 0, 0, 0},
@@ -268,8 +272,15 @@ void UartEncoderDriveBackend::pollReceive(uint32_t nowMs, const RuntimeConfig &r
     // One pass can consume the longest supported 73-byte vendor reply.
     while (serial_.available() > 0 && processed++ < 80) {
         const char value = static_cast<char>(serial_.read());
-        if (parser_.feed(value) == MotorBoardFeedResult::Complete)
+#if ROBOT_CALIBRATION
+        if (receivedBytes_ != 255) ++receivedBytes_;
+#endif
+        if (parser_.feed(value) == MotorBoardFeedResult::Complete) {
+#if ROBOT_CALIBRATION
+            noteDiagnosticFrame(parser_.frame());
+#endif
             finishMessage(parser_.frame(), nowMs, runtime);
+        }
     }
     const uint32_t responseTimeoutMs =
         initStage_ == InitStage::Qualifying
@@ -291,8 +302,10 @@ void UartEncoderDriveBackend::pollReceive(uint32_t nowMs, const RuntimeConfig &r
                 ++consecutiveTimeouts_;
             if (consecutiveTimeouts_ >=
                     config::MotorBoardConsecutiveTimeoutLimit) {
+#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
                 feedback_.encoderValidMask = 0;
                 faults_ |= FaultEncoderStale;
+#endif
             }
         }
 #if ROBOT_CALIBRATION
@@ -302,8 +315,11 @@ void UartEncoderDriveBackend::pollReceive(uint32_t nowMs, const RuntimeConfig &r
 #endif
     }
     if (initStage_ == InitStage::Ready && feedback_.incrementUpdatedAtMs != 0 &&
-        nowMs - feedback_.incrementUpdatedAtMs >= config::FeedbackStaleMs)
+        nowMs - feedback_.incrementUpdatedAtMs >= config::FeedbackStaleMs) {
+#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
         faults_ |= FaultEncoderStale;
+#endif
+    }
 }
 
 void UartEncoderDriveBackend::service(
@@ -453,6 +469,25 @@ void UartEncoderDriveBackend::acceptTotals(const int32_t *values) {
         feedback_.total[index] = values[index];
     feedback_.totalValidMask = 0x0F;
 }
+
+void UartEncoderDriveBackend::noteDiagnosticFrame(const char *message) {
+    if (completeFrames_ != 255) ++completeFrames_;
+    if (strncmp_P(
+            message, IncrementPrefix, sizeof(IncrementPrefix) - 1
+        ) == 0) {
+        if (incrementFrames_ != 255) ++incrementFrames_;
+    } else if (strncmp_P(
+                   message, MotorTypeAckPrefix,
+                   sizeof(MotorTypeAckPrefix) - 1
+               ) == 0) {
+        configurationAckMask_ |= 0x01;
+    } else if (strncmp_P(
+                   message, PolarityAckPrefix,
+                   sizeof(PolarityAckPrefix) - 1
+               ) == 0) {
+        configurationAckMask_ |= 0x02;
+    }
+}
 #endif
 
 void UartEncoderDriveBackend::setWheelTargets(const WheelTargets &targets) { targets_ = targets; }
@@ -529,15 +564,34 @@ void UartEncoderDriveBackend::stop(uint32_t nowMs) {
 }
 
 const DriveFeedback &UartEncoderDriveBackend::feedback() const { return feedback_; }
+#if ROBOT_CALIBRATION
+DriveDiagnostics UartEncoderDriveBackend::diagnostics() const {
+    return {
+        static_cast<uint8_t>(initStage_),
+        receivedBytes_,
+        completeFrames_,
+        incrementFrames_,
+        configurationAckMask_
+    };
+}
+#endif
 DriveHealth UartEncoderDriveBackend::health(uint32_t nowMs) const {
     const bool fresh = feedback_.incrementUpdatedAtMs != 0 &&
         nowMs - feedback_.incrementUpdatedAtMs < config::FeedbackStaleMs;
     const bool ready =
         initStage_ == InitStage::Ready &&
         feedback_.encoderValidMask == 0x0F;
-    const uint16_t warnings =
+    uint16_t warnings =
         config::DriveCalibrated ? 0 : WarningDriveUnqualified;
-    return {faults_, warnings, initStage_ == InitStage::Ready, ready, ready && fresh};
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+    warnings |= WarningDriverTimeoutUnsafe;
+    if (consecutiveTimeouts_ != 0 || (ready && !fresh))
+        warnings |= WarningEncoderTimeoutIgnored;
+#endif
+    return {
+        faults_, warnings, initStage_ == InitStage::Ready, ready,
+        ready && (fresh || config::DriverTimeoutUnsafe)
+    };
 }
 void UartEncoderDriveBackend::clearFaults() {
     faults_ = 0;

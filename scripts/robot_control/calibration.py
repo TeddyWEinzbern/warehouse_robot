@@ -51,6 +51,31 @@ NACK_REASONS = {
        " is outside the calibration limits",
 }
 
+FIRMWARE_STATE_NAMES = {
+    0: "BOOT",
+    1: "DISARMED",
+    2: "ARMED",
+    3: "ESTOP",
+    4: "FAULT",
+}
+
+DRIVER_INIT_STAGE_NAMES = {
+    0: "settling",
+    1: "motor_type",
+    2: "encoder_polarity",
+    3: "qualification_delay",
+    4: "qualifying",
+    5: "retry_wait",
+    6: "ready",
+}
+
+DRIVE_WARNING_NAMES = {
+    0: "drive_unqualified",
+    1: "arm_target_limited",
+    2: "driver_timeout_unsafe",
+    3: "encoder_timeout_ignored",
+}
+
 HELP_TEXT = """arm commands:
   j<n> <angle>     move joint n (0 base, 1 shoulder, 2 elbow, 3 gripper)
                    to an absolute servo angle 0-180; the first command for
@@ -82,7 +107,8 @@ motor commands (wheels raised off the ground!):
   geom <wheel_mm> <counts_per_rev> <track_mm> <wheelbase_mm>
                     record measured wheel geometry, e.g. `geom 60 4680 160 170`
 session commands:
-  s                show joint state, motor mappings, marks, fold estimate
+  s                show firmware/driver diagnostics, joint state, mappings,
+                   marks, and fold estimate
   export           print the BuildConfig.h block from the recorded marks
   help             show this text
   q                quit (latches E-stop; servos hold their last position)"""
@@ -166,6 +192,7 @@ class CalibrationSession:
         self.sensor_mm: list[int] | None = None
         self.sensor_valid_mask = 0
         self.minimum_untouched_stack_bytes: int | None = None
+        self.system_report: dict[str, Any] | None = None
         self.hello: dict[str, Any] = {}
 
     # -- transport helpers --------------------------------------------------
@@ -244,6 +271,7 @@ class CalibrationSession:
                 self.sensor_mm = list(decoded["distances_mm"])
                 self.sensor_valid_mask = int(decoded["valid_mask"])
             elif kind == "cal_system":
+                self.system_report = decoded
                 self.minimum_untouched_stack_bytes = int(
                     decoded["minimum_untouched_stack_bytes"]
                 )
@@ -739,21 +767,66 @@ class CalibrationSession:
             )
         self.out("\n".join(lines))
 
-    def _show_system(self) -> None:
+    def _request_system_report(self) -> dict[str, Any]:
+        self.system_report = None
         sequence = self._send(MessageType.CAL_READ_SYSTEM)
         self._await_reply(
             expected_sequence=sequence,
             report_kind=CalibrationReportKind.SYSTEM,
         )
-        remaining = self.minimum_untouched_stack_bytes
-        if remaining is None:
-            self.out("no system report was returned")
-            return
+        if self.system_report is None:
+            raise CalibrationError("no system report was returned")
+        return self.system_report
+
+    @staticmethod
+    def _diagnostic_lines(report: dict[str, Any]) -> list[str]:
+        if "state" not in report:
+            return []
+        state = int(report["state"])
+        stage = int(report["driver_init_stage"])
+        ack_mask = int(report["driver_configuration_ack_mask"])
+        warnings = int(report.get("drive_warnings", 0))
+        ack_names = []
+        if ack_mask & 0x01:
+            ack_names.append("motor_type")
+        if ack_mask & 0x02:
+            ack_names.append("polarity")
+        warning_names = [
+            name
+            for bit, name in DRIVE_WARNING_NAMES.items()
+            if warnings & (1 << bit)
+        ]
+
+        def count(value: Any) -> str:
+            numeric = int(value)
+            return "255+" if numeric == 255 else str(numeric)
+
+        return [
+            "firmware state: "
+            f"{FIRMWARE_STATE_NAMES.get(state, f'UNKNOWN({state})')}; "
+            f"drive initialized={'yes' if report['drive_initialized'] else 'no'}; "
+            f"feedback ready={'yes' if report['feedback_ready'] else 'no'}; "
+            f"healthy={'yes' if report['feedback_healthy'] else 'no'}; "
+            f"faults=0x{int(report['drive_faults']):04X}; "
+            f"warnings={','.join(warning_names) if warning_names else 'none'}",
+            "driver UART: "
+            f"stage={DRIVER_INIT_STAGE_NAMES.get(stage, f'unknown({stage})')}; "
+            f"RX bytes={count(report['driver_rx_bytes'])}; "
+            f"complete frames={count(report['driver_complete_frames'])}; "
+            f"encoder frames={count(report['driver_increment_frames'])}; "
+            f"SET ACKs={','.join(ack_names) if ack_names else 'none'}",
+        ]
+
+    def _show_system(self) -> None:
+        report = self._request_system_report()
+        remaining = int(report["minimum_untouched_stack_bytes"])
         verdict = "PASS" if remaining >= 256 else "FAIL"
-        self.out(
+        lines = [
             f"minimum untouched stack: {remaining} B — {verdict}"
             " (required >= 256 B)"
-        )
+        ]
+        lines.extend(self._diagnostic_lines(report))
+        self.out("\n".join(lines))
 
     def _handle_stress(self, tokens: list[str]) -> None:
         if len(tokens) > 2:
@@ -784,7 +857,12 @@ class CalibrationSession:
         )
 
     def _show_status(self) -> None:
-        if self.hello.get("arm_enabled", True):
+        system = self._request_system_report()
+        state = system.get("state")
+        if (
+            self.hello.get("arm_enabled", True)
+            and (state is None or state == 1)
+        ):
             sequence = self._send(MessageType.CAL_READ_ARM)
             self._await_reply(
                 expected_sequence=sequence,
@@ -792,7 +870,8 @@ class CalibrationSession:
             )
         else:
             self.reported_servo = None
-        lines = ["joint      commanded  reported   dir  marks"]
+        lines = self._diagnostic_lines(system)
+        lines.append("joint      commanded  reported   dir  marks")
         for joint in range(JOINT_COUNT):
             commanded = self.commanded[joint]
             reported = (

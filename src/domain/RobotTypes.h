@@ -54,6 +54,8 @@ enum WarningCode : uint16_t {
     WarningNone = 0,
     WarningDriveUnqualified = 1U << 0,
     WarningArmTargetLimited = 1U << 1,
+    WarningDriverTimeoutUnsafe = 1U << 2,
+    WarningEncoderTimeoutIgnored = 1U << 3,
 };
 
 struct OperatorControlFrame {
@@ -145,6 +147,16 @@ struct DriveHealth {
     bool feedbackReady;
     bool feedbackHealthy;
 };
+
+#if ROBOT_CALIBRATION
+struct DriveDiagnostics {
+    uint8_t initializationStage;
+    uint8_t receivedBytes;
+    uint8_t completeFrames;
+    uint8_t incrementFrames;
+    uint8_t configurationAckMask;
+};
+#endif
 
 struct AssistOutput {
     DriveIntent drive;

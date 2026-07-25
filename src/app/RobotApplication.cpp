@@ -222,7 +222,10 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
 
     PendingCalibrationRead request = {};
     if (communication_.takeCalibrationRead(request)) {
-        if (safety_.state() != RobotState::Disarmed ||
+        const bool systemRead =
+            request.type == MessageType::CalibrationReadSystem;
+        if ((!systemRead &&
+             safety_.state() != RobotState::Disarmed) ||
             !sendCalibrationReport(request, nowMs)) {
             communication_.sendNack(
                 request.sequence, request.type,
@@ -595,12 +598,26 @@ bool RobotApplication::sendCalibrationReport(
     }
 
     if (request.type == MessageType::CalibrationReadSystem) {
-        uint8_t payload[3];
+        uint8_t payload[14];
         uint8_t offset = 0;
         payload[offset++] = static_cast<uint8_t>(
             CalibrationReportKind::System
         );
         putU16(payload, offset, minimumFreeStackBytes());
+        const DriveHealth health = effectiveDriveHealth(nowMs);
+        const DriveDiagnostics diagnostics = driveBackend_.diagnostics();
+        payload[offset++] = static_cast<uint8_t>(safety_.state());
+        payload[offset++] =
+            (health.initialized ? 0x01 : 0) |
+            (health.feedbackReady ? 0x02 : 0) |
+            (health.feedbackHealthy ? 0x04 : 0);
+        putU16(payload, offset, health.faults);
+        putU16(payload, offset, health.warnings);
+        payload[offset++] = diagnostics.initializationStage;
+        payload[offset++] = diagnostics.receivedBytes;
+        payload[offset++] = diagnostics.completeFrames;
+        payload[offset++] = diagnostics.incrementFrames;
+        payload[offset++] = diagnostics.configurationAckMask;
         return communication_.sendFrame(
             MessageType::CalibrationReport, request.sequence,
             payload, offset

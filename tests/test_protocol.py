@@ -224,6 +224,29 @@ class ReplyDecodeTests(unittest.TestCase):
         self.assertEqual(decoded["kind"], "cal_system")
         self.assertEqual(decoded["minimum_untouched_stack_bytes"], 287)
 
+    def test_calibration_system_report_decodes_driver_diagnostics(self):
+        payload = bytes((CalibrationReportKind.SYSTEM,))
+        payload += struct.pack(
+            "<HBBHHBBBBB",
+            287, 0, 0x03, 0x0004, 0x000C, 5, 61, 3, 1, 0x03
+        )
+        decoded = decode_message_data(
+            decode_message(
+                encode_message(MessageType.CAL_REPORT, 10, payload)
+            )
+        )
+        self.assertEqual(decoded["state"], 0)
+        self.assertTrue(decoded["drive_initialized"])
+        self.assertTrue(decoded["feedback_ready"])
+        self.assertFalse(decoded["feedback_healthy"])
+        self.assertEqual(decoded["drive_faults"], 0x0004)
+        self.assertEqual(decoded["drive_warnings"], 0x000C)
+        self.assertEqual(decoded["driver_init_stage"], 5)
+        self.assertEqual(decoded["driver_rx_bytes"], 61)
+        self.assertEqual(decoded["driver_complete_frames"], 3)
+        self.assertEqual(decoded["driver_increment_frames"], 1)
+        self.assertEqual(decoded["driver_configuration_ack_mask"], 0x03)
+
 
 if __name__ == "__main__":
     unittest.main()

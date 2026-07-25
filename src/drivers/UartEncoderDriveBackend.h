@@ -18,6 +18,7 @@ class UartEncoderDriveBackend : public DriveBackend {
     void onEncoderDeadline(uint32_t nowMs, const RuntimeConfig &runtime);
 #if ROBOT_CALIBRATION
     void onEncoderTotalDeadline(uint32_t nowMs);
+    DriveDiagnostics diagnostics() const;
 #endif
     void stop(uint32_t nowMs);
 #if ROBOT_CALIBRATION
@@ -58,6 +59,10 @@ class UartEncoderDriveBackend : public DriveBackend {
     uint32_t lastZeroAtMs_;
 #if ROBOT_CALIBRATION
     bool totalDue_;
+    uint8_t receivedBytes_;
+    uint8_t completeFrames_;
+    uint8_t incrementFrames_;
+    uint8_t configurationAckMask_;
 #endif
     uint32_t badSignSinceMs_[4];
     uint32_t stallSinceMs_[4];
@@ -102,6 +107,7 @@ class UartEncoderDriveBackend : public DriveBackend {
     void acceptEncoder(const int32_t *values, uint32_t nowMs, const RuntimeConfig &runtime);
 #if ROBOT_CALIBRATION
     void acceptTotals(const int32_t *values);
+    void noteDiagnosticFrame(const char *message);
 #endif
     void updateWheelHealth(uint8_t wheel, uint32_t nowMs);
     void markMalformed();

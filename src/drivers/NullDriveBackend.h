@@ -14,6 +14,7 @@ class NullDriveBackend : public DriveBackend {
     void onEncoderDeadline(uint32_t, const RuntimeConfig &) {}
 #if ROBOT_CALIBRATION
     void onEncoderTotalDeadline(uint32_t) {}
+    DriveDiagnostics diagnostics() const { return {0, 0, 0, 0, 0}; }
 #endif
     void stop(uint32_t) {}
     const DriveFeedback &feedback() const { return feedback_; }

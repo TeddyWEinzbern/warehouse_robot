@@ -133,9 +133,35 @@ def sensor_report(sequence: int, distances, valid_mask=0x3F) -> bytes:
     return encode_message(MessageType.CAL_REPORT, sequence, payload)
 
 
-def system_report(sequence: int, minimum_stack_bytes: int) -> bytes:
+def system_report(
+    sequence: int,
+    minimum_stack_bytes: int,
+    *,
+    state: int | None = None,
+    drive_flags: int = 0,
+    drive_faults: int = 0,
+    drive_warnings: int = 0,
+    init_stage: int = 0,
+    rx_bytes: int = 0,
+    complete_frames: int = 0,
+    increment_frames: int = 0,
+    ack_mask: int = 0,
+) -> bytes:
     payload = bytes((CalibrationReportKind.SYSTEM,))
     payload += struct.pack("<H", minimum_stack_bytes)
+    if state is not None:
+        payload += struct.pack(
+            "<BBHHBBBBB",
+            state,
+            drive_flags,
+            drive_faults,
+            drive_warnings,
+            init_stage,
+            rx_bytes,
+            complete_frames,
+            increment_frames,
+            ack_mask,
+        )
     return encode_message(MessageType.CAL_REPORT, sequence, payload)
 
 
@@ -210,21 +236,41 @@ class MoveAndReferenceTests(unittest.TestCase):
 class OnDemandReportTests(unittest.TestCase):
     def test_status_requests_arm_report_instead_of_streaming_data(self):
         link = FakeLink()
-        link.queue_reply(arm_report(1))
+        link.queue_reply(
+            system_report(
+                1, 400, state=1, drive_flags=0x07,
+                init_stage=6, rx_bytes=64, complete_frames=2,
+                increment_frames=1, ack_mask=0x03,
+            )
+        )
+        link.queue_reply(arm_report(2))
         session, output = make_session(link)
         session.handle_line("s")
         request = decode_message(link.written[-1])
         self.assertEqual(request.message_type, MessageType.CAL_READ_ARM)
+        self.assertIn("firmware state: DISARMED", output[-1])
+        self.assertIn("SET ACKs=motor_type,polarity", output[-1])
         self.assertIn("91", output[-1])
         self.assertIn("reported", output[-1])
 
     def test_status_still_shows_local_records_when_arm_is_disabled(self):
         link = FakeLink()
+        link.queue_reply(
+            system_report(
+                1, 400, state=0, init_stage=5,
+                rx_bytes=0, complete_frames=0,
+            )
+        )
         session, output = make_session(link)
         session.hello = {"arm_enabled": False}
         session.motor_map[0] = (1, 1)
         session.handle_line("s")
-        self.assertEqual(link.written, [])
+        self.assertEqual(
+            decode_message(link.written[0]).message_type,
+            MessageType.CAL_READ_SYSTEM,
+        )
+        self.assertIn("firmware state: BOOT", output[-1])
+        self.assertIn("stage=retry_wait", output[-1])
         self.assertIn("motor map: ch0->fr+", output[-1])
 
     def test_counts_requests_both_drive_pages(self):
@@ -267,6 +313,29 @@ class OnDemandReportTests(unittest.TestCase):
                 )
                 self.assertIn(f"{remaining} B", output[-1])
                 self.assertIn(verdict, output[-1])
+
+    def test_extended_system_report_prints_driver_uart_diagnostics(self):
+        link = FakeLink()
+        link.queue_reply(
+            system_report(
+                1, 300, state=4, drive_flags=0x03,
+                drive_faults=0x0004, drive_warnings=0x000C,
+                init_stage=6, rx_bytes=255,
+                complete_frames=9, increment_frames=7, ack_mask=0x01,
+            )
+        )
+        session, output = make_session(link)
+        session.handle_line("system")
+        report = output[-1]
+        self.assertIn("firmware state: FAULT", report)
+        self.assertIn("faults=0x0004", report)
+        self.assertIn(
+            "warnings=driver_timeout_unsafe,encoder_timeout_ignored",
+            report,
+        )
+        self.assertIn("RX bytes=255+", report)
+        self.assertIn("encoder frames=7", report)
+        self.assertIn("SET ACKs=motor_type", report)
 
     def test_invalid_drive_channels_are_not_printed_as_calibration_values(self):
         link = FakeLink()

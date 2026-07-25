@@ -14,6 +14,7 @@ from robot_control.protocol import (
 )
 from robot_control.runtime import (
     CONTROL_RATE_HZ,
+    WARNING_NAMES,
     RobotRuntime,
     RuntimeCommand,
     _reschedule_control,
@@ -113,6 +114,19 @@ def wait_for(predicate, timeout=0.5):
     while not predicate() and time.monotonic() < deadline:
         time.sleep(0.005)
     return predicate()
+
+
+class StatusNameTests(unittest.TestCase):
+    def test_unsafe_driver_warning_bits_have_stable_names(self):
+        self.assertEqual(
+            WARNING_NAMES,
+            (
+                "drive_unqualified",
+                "arm_target_limited",
+                "driver_timeout_unsafe",
+                "encoder_timeout_ignored",
+            ),
+        )
 
 
 class RuntimeHandshakeTests(unittest.TestCase):

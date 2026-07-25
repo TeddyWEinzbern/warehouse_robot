@@ -172,7 +172,8 @@ Critical `state` values are `0` Boot, `1` Disarmed, `2` Armed, `3` E-stop, and
 | 7 | drive mismatch |
 | 8 | arm target |
 
-Warning bits are bit 0 drive unqualified and bit 1 arm target limited.
+Warning bits are bit 0 drive unqualified, bit 1 arm target limited, bit 2
+driver-timeout unsafe build active, and bit 3 encoder timeout ignored.
 NACK reasons are `1` malformed, `2` unsupported, `3` invalid state, and `4`
 validation failure.
 
@@ -184,7 +185,7 @@ A calibration report starts with `kind:u8`:
 | `2` drive counts | four `i16` increments, four `i32` totals, `valid_mask:u8` |
 | `3` drive speed | four `i16` millimetres-per-second values, `valid_mask:u8` |
 | `4` sensor | six `u16` millimetre distances, `valid_mask:u8` |
-| `5` system | `minimum_untouched_stack_bytes:u16` |
+| `5` system | `minimum_untouched_stack_bytes:u16`, `state:u8`, drive-health flags (`initialized`, `feedback_ready`, `feedback_healthy`), `drive_faults:u16`, `drive_warnings:u16`, driver initialization stage, saturating RX-byte/complete-frame/increment-frame counters, configuration-ACK mask |
 
 Calibration drive-spin mode `0` is open-loop percent and mode `1` is
 closed-loop millimetres per second. Channels are `0..3`; the compiled limits
@@ -254,8 +255,9 @@ remains bounded by compiled limits.
 - Drive/encoder data is returned only after an explicit drive-read request.
 - Sonar data is returned only after an explicit sensor-read request.
 - Arm state is returned only after an explicit arm-read request.
-- Minimum untouched stack is returned only after an explicit system-read
-  request.
+- Minimum untouched stack and calibration-only driver diagnostics are returned
+  only after an explicit system-read request. This read is available in Boot,
+  DISARMED, E-stop, and Fault because it cannot command an actuator.
 - Exported values are reviewed and written into source defaults before the
   matching `*_CALIBRATED` flag is set.
 
@@ -375,18 +377,17 @@ measurement of live stack headroom.
 | Image | Flash | Static SRAM | Static free |
 | --- | ---: | ---: | ---: |
 | v2 closed-loop robot (`ba4b8ad`) | 31,668 B (98.2%) | 1,812 B (88.5%) | 236 B |
-| v3 drive-only qualified default | 18,490 B (57.3%) | 1,307 B (63.8%) | 741 B |
-| v3 qualified closed-loop robot | 28,134 B (87.2%) | 1,311 B (64.0%) | 737 B |
+| v3 `robot` | 28,134 B (87.2%) | 1,311 B (64.0%) | 737 B |
+| v3 `robot_unsafe` | 28,068 B (87.0%) | 1,311 B (64.0%) | 737 B |
 | v3 qualified robot + sonar | 30,246 B (93.8%) | 1,331 B (65.0%) | 717 B |
 | v2 calibration (`ba4b8ad`) | 31,844 B (98.7%) | 1,835 B (89.6%) | 213 B |
-| v3 calibration | 22,942 B (71.1%) | 1,457 B (71.1%) | 591 B |
+| v3 `calibration` | 23,518 B (72.9%) | 1,463 B (71.4%) | 585 B |
+| v3 `calibration_unsafe` | 23,436 B (72.7%) | 1,463 B (71.4%) | 585 B |
 
 The fair production comparison is v2 closed-loop against v3 qualified
 closed-loop: flash falls by 3,534 bytes (11.2%), static SRAM by 501 bytes
-(27.6%), and static free SRAM rises from 236 to 737 bytes. The drive-only
-default is intentionally not used for that comparison because disabled arm
-paths make it a different feature set. For calibration, flash falls by
-8,902 bytes (28.0%) and static SRAM by 378 bytes (20.6%).
+(27.6%), and static free SRAM rises from 236 to 737 bytes. For calibration,
+flash falls by 8,326 bytes (26.1%) and static SRAM by 372 bytes (20.3%).
 
 The production-only pruning removes calibration command state/ACK handling
 and the unused periodic encoder-total path. At that measured step it reduced
@@ -394,7 +395,8 @@ the worst-case sonar image from 31,746-byte/1,394-byte to
 30,076-byte/1,330-byte: 1,670 bytes of Flash and 64 bytes of SRAM recovered.
 The subsequent timeout hardening adds 170 bytes of Flash and one byte of
 static SRAM to that image. Calibration retains encoder-total queries and
-reports.
+reports, plus the read-only driver initialization counters used to distinguish
+an electrically silent D0 input from rejected or missing motor-board replies.
 
 The linked v3 matrix contains no application-visible `malloc`, `calloc`,
 `realloc`, `free`, or C++ allocator symbols. The 256-byte live watermark gate
@@ -435,6 +437,14 @@ The motor board is independent of the HC-06 host protocol:
   `encoder stale` and makes feedback invalid. A fresh valid reply restores
   feedback health, but the fault remains latched until explicitly cleared.
   Malformed and implausible replies retain their separate fault paths.
+- The explicitly named `robot_unsafe` and `calibration_unsafe` images still
+  require the vendor-prefixed initialization reply; normal robot arming also
+  requires at least one parseable encoder sample. After feedback is Ready,
+  query timeout/stale does not clear readiness or set the stale fault. Control
+  remains possible and critical status publishes the always-on
+  `driver_timeout_unsafe` warning plus `encoder_timeout_ignored` while replies
+  are missing. Malformed, implausible, E-stop, host-link, scheduler, arm, and
+  initialization protections are unchanged.
 
 The driver-board UART remains compiled and allocated in shipped Uno images.
 `ROBOT_DRIVE_ENABLED=0` prevents initialization, polling, and commands; it does

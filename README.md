@@ -1,9 +1,10 @@
 # Warehouse Robot Control System
 
 Safety-oriented Arduino Uno firmware and a Python host console for a four-wheel
-mecanum warehouse robot. The project has two deployable firmware environments:
-`robot` and `calibration`. Host-native tests use `native`, plus
-`native_calibration` for calibration-only protocol and encoder-total paths.
+mecanum warehouse robot. The normal deployable firmware environments are
+`robot` and `calibration`; each has an explicitly degraded `_unsafe`
+counterpart for raised-wheel driver-timeout diagnosis only. Host-native tests
+use `native`, plus `native_calibration` and `native_unsafe`.
 
 The UART motor board owns the wheel-speed controller:
 
@@ -56,9 +57,15 @@ pio run -e calibration
 # Normal robot image. Closed-loop control and 9600 baud are the defaults.
 pio run -e robot
 
+# Raised-wheel diagnosis only: post-Ready encoder timeout/stale becomes a
+# visible warning and does not block control.
+pio run -e robot_unsafe
+pio run -e calibration_unsafe
+
 # Host-native domain and protocol tests.
 pio test -e native
 pio test -e native_calibration
+pio test -e native_unsafe
 ```
 
 The feature flags are intentionally separated by meaning:
@@ -74,6 +81,7 @@ The feature flags are intentionally separated by meaning:
 | `ROBOT_ARM_CALIBRATED` | Records completed arm calibration. It does not enable the arm. |
 | `ROBOT_SENSOR_ENABLED` | Functional sonar gate; omitted means `0`. Disabled sensors remain allocated but their pins and scheduler are not activated. The shipped `calibration` environment selects `1` so sensors can be qualified. |
 | `ROBOT_CALIBRATION` | Selects the calibration firmware personality. Set by the `calibration` environment. |
+| `ROBOT_DRIVER_TIMEOUT_UNSAFE` | Explicitly degrades only post-Ready encoder timeout/stale handling from fault to warning. Initialization still requires the vendor reply, normal arming still requires one parseable feedback sample, and other faults are not bypassed. |
 | `ROBOT_HOST_BAUD` | HC-06 UART baud: `9600UL` by default or `38400UL`. |
 
 Preprocessor decisions are kept at structural boundaries: defaults and
@@ -88,6 +96,13 @@ Keep motor power physically isolated as well; a compile-time flag is not an
 emergency disconnect. The calibration image observes the same enable flags, so
 disabled hardware does not become active merely because calibration firmware
 is running.
+
+`robot_unsafe` and `calibration_unsafe` can continue commanding the last
+requested motion after encoder feedback is lost. They always publish
+`driver_timeout_unsafe`, add `encoder_timeout_ignored` while feedback is
+missing,
+and must only be used with every wheel raised and an immediate physical power
+cutoff available. Never deploy either image for ground operation.
 
 To select open-loop board control, replace
 `-DROBOT_DRIVER_CONTROL_CLOSE=1` with

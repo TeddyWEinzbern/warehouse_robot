@@ -33,6 +33,9 @@
 #ifndef ROBOT_DRIVER_CONTROL_OPEN
 #define ROBOT_DRIVER_CONTROL_OPEN 0
 #endif
+#ifndef ROBOT_DRIVER_TIMEOUT_UNSAFE
+#define ROBOT_DRIVER_TIMEOUT_UNSAFE 0
+#endif
 
 #if ROBOT_DRIVER_ENABLED
 #if (ROBOT_DRIVER_CONTROL_CLOSE + ROBOT_DRIVER_CONTROL_OPEN) != 1
@@ -48,6 +51,11 @@
 
 #if ROBOT_DRIVE_ENABLED && !ROBOT_DRIVER_ENABLED
 #error "ROBOT_DRIVE_ENABLED requires ROBOT_DRIVER_ENABLED"
+#endif
+
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE && \
+    (!ROBOT_DRIVER_ENABLED || !ROBOT_DRIVE_ENABLED)
+#error "ROBOT_DRIVER_TIMEOUT_UNSAFE requires the UART drive"
 #endif
 
 #if ROBOT_HOST_BAUD != 9600UL && ROBOT_HOST_BAUD != 38400UL
@@ -93,6 +101,7 @@ constexpr uint32_t MotorLateThresholdUs = 10000UL;
 
 constexpr bool DriverEnabled = ROBOT_DRIVER_ENABLED != 0;
 constexpr bool DriveEnabled = ROBOT_DRIVE_ENABLED != 0;
+constexpr bool DriverTimeoutUnsafe = ROBOT_DRIVER_TIMEOUT_UNSAFE != 0;
 constexpr bool ArmEnabled = ROBOT_ARM_ENABLED != 0;
 constexpr bool SensorEnabled = ROBOT_SENSOR_ENABLED != 0;
 constexpr bool DriveCalibrated = ROBOT_DRIVE_CALIBRATED != 0;

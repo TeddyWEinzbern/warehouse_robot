@@ -250,6 +250,7 @@ void test_single_timeout_keeps_sample_and_success_resets_the_streak() {
     TEST_ASSERT_EQUAL_UINT16(0, backend.health(544).faults);
 }
 
+#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
 void test_three_consecutive_normal_query_timeouts_latch_stale_fault() {
     HardwareSerial serial;
     UartEncoderDriveBackend backend(serial);
@@ -305,6 +306,65 @@ void test_feedback_becomes_stale_at_the_configured_threshold() {
         (backend.health(549).faults & FaultEncoderStale) != 0
     );
 }
+#else
+void test_unsafe_timeouts_keep_ready_and_raise_warnings() {
+    HardwareSerial serial;
+    UartEncoderDriveBackend backend(serial);
+    const RuntimeConfig runtime = RuntimeConfig::defaults();
+    initializeWithValidFeedback(backend, serial, runtime);
+
+    const uint32_t queryTimes[] = {450, 481, 512};
+    for (uint8_t index = 0; index < 3; ++index) {
+        startNormalEncoderQuery(
+            backend, runtime, queryTimes[index]
+        );
+        backend.pollReceive(
+            queryTimes[index] + config::MotorBoardQueryTimeoutMs,
+            runtime
+        );
+    }
+
+    const DriveHealth timedOut = backend.health(542);
+    TEST_ASSERT_EQUAL_UINT16(0, timedOut.faults);
+    TEST_ASSERT_TRUE(timedOut.initialized);
+    TEST_ASSERT_TRUE(timedOut.feedbackReady);
+    TEST_ASSERT_TRUE(timedOut.feedbackHealthy);
+    TEST_ASSERT_TRUE(
+        (timedOut.warnings & WarningDriverTimeoutUnsafe) != 0
+    );
+    TEST_ASSERT_TRUE(
+        (timedOut.warnings & WarningEncoderTimeoutIgnored) != 0
+    );
+
+    startNormalEncoderQuery(backend, runtime, 543);
+    serial.queueReceive("$MOTOR_4CH_Encoder_20ms:1,2,3,4!");
+    backend.pollReceive(544, runtime);
+    const DriveHealth recovered = backend.health(544);
+    TEST_ASSERT_EQUAL_UINT16(0, recovered.faults);
+    TEST_ASSERT_TRUE(recovered.feedbackHealthy);
+    TEST_ASSERT_TRUE(
+        (recovered.warnings & WarningDriverTimeoutUnsafe) != 0
+    );
+    TEST_ASSERT_EQUAL_UINT16(
+        0, recovered.warnings & WarningEncoderTimeoutIgnored
+    );
+}
+
+void test_unsafe_sample_age_keeps_feedback_healthy_with_warning() {
+    HardwareSerial serial;
+    UartEncoderDriveBackend backend(serial);
+    const RuntimeConfig runtime = RuntimeConfig::defaults();
+    initializeWithValidFeedback(backend, serial, runtime);
+
+    const DriveHealth stale = backend.health(549);
+    TEST_ASSERT_EQUAL_UINT16(0, stale.faults);
+    TEST_ASSERT_TRUE(stale.feedbackReady);
+    TEST_ASSERT_TRUE(stale.feedbackHealthy);
+    TEST_ASSERT_TRUE(
+        (stale.warnings & WarningEncoderTimeoutIgnored) != 0
+    );
+}
+#endif
 
 #if ROBOT_CALIBRATION
 void completeFreshIncrement(
@@ -317,6 +377,31 @@ void completeFreshIncrement(
     serial.queueReceive("$MOTOR_4CH_Encoder_20ms:1,2,3,4!");
     backend.pollReceive(deadlineMs + 1, runtime);
     TEST_ASSERT_EQUAL_UINT8(0, backend.outstandingQuery());
+}
+
+void test_calibration_diagnostics_count_uart_frames_and_set_acks() {
+    HardwareSerial serial;
+    UartEncoderDriveBackend backend(serial);
+    const RuntimeConfig runtime = RuntimeConfig::defaults();
+
+    arduinoSetMillis(0);
+    backend.begin(runtime);
+    serviceAt(backend, runtime, 100);
+    serial.queueReceive("$MOTOR_4CH_SET_OK:0!");
+    backend.pollReceive(101, runtime);
+    serviceAt(backend, runtime, 200);
+    serial.queueReceive("$MOTOR_4CH_SET_ENCPDER_POLARITY_OK:0!");
+    backend.pollReceive(201, runtime);
+    serviceAt(backend, runtime, 300);
+    serial.queueReceive("$MOTOR_4CH_Encoder_20ms:0,0,0,0!");
+    backend.pollReceive(320, runtime);
+
+    const DriveDiagnostics diagnostics = backend.diagnostics();
+    TEST_ASSERT_EQUAL_UINT8(6, diagnostics.initializationStage);
+    TEST_ASSERT_EQUAL_UINT8(89, diagnostics.receivedBytes);
+    TEST_ASSERT_EQUAL_UINT8(3, diagnostics.completeFrames);
+    TEST_ASSERT_EQUAL_UINT8(1, diagnostics.incrementFrames);
+    TEST_ASSERT_EQUAL_UINT8(0x03, diagnostics.configurationAckMask);
 }
 
 void test_calibration_total_query_parses_all_four_i32_values() {
@@ -405,13 +490,23 @@ int main(int, char **) {
     RUN_TEST(
         test_single_timeout_keeps_sample_and_success_resets_the_streak
     );
+#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
     RUN_TEST(
         test_three_consecutive_normal_query_timeouts_latch_stale_fault
     );
     RUN_TEST(
         test_feedback_becomes_stale_at_the_configured_threshold
     );
+#else
+    RUN_TEST(test_unsafe_timeouts_keep_ready_and_raise_warnings);
+    RUN_TEST(
+        test_unsafe_sample_age_keeps_feedback_healthy_with_warning
+    );
+#endif
 #if ROBOT_CALIBRATION
+    RUN_TEST(
+        test_calibration_diagnostics_count_uart_frames_and_set_acks
+    );
     RUN_TEST(test_calibration_total_query_parses_all_four_i32_values);
     RUN_TEST(
         test_calibration_total_bad_reply_and_timeout_clear_validity

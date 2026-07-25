@@ -48,6 +48,8 @@ FAULT_NAMES = (
 WARNING_NAMES = (
     "drive_unqualified",
     "arm_target_limited",
+    "driver_timeout_unsafe",
+    "encoder_timeout_ignored",
 )
 
 CONTROL_RATE_HZ = 30.0

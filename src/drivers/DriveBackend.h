@@ -15,6 +15,7 @@ class DriveBackend {
     virtual void onEncoderDeadline(uint32_t nowMs, const RuntimeConfig &runtime) = 0;
 #if ROBOT_CALIBRATION
     virtual void onEncoderTotalDeadline(uint32_t nowMs) = 0;
+    virtual DriveDiagnostics diagnostics() const = 0;
 #endif
     virtual void stop(uint32_t nowMs) = 0;
     virtual const DriveFeedback &feedback() const = 0;

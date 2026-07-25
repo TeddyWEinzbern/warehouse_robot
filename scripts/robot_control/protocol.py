@@ -427,13 +427,46 @@ def decode_message_data(message: Message) -> dict[str, Any]:
                 "distances_mm": list(struct.unpack("<6H", payload[1:13])),
                 "valid_mask": payload[13],
             }
-        if kind == CalibrationReportKind.SYSTEM and len(payload) == 3:
-            return {
+        if (
+            kind == CalibrationReportKind.SYSTEM
+            and len(payload) in (3, 12, 14)
+        ):
+            decoded = {
                 "kind": "cal_system",
                 "minimum_untouched_stack_bytes": int.from_bytes(
                     payload[1:3], "little"
                 ),
             }
+            if len(payload) in (12, 14):
+                flags = payload[4]
+                diagnostic_offset = 9 if len(payload) == 14 else 7
+                decoded.update(
+                    {
+                        "state": payload[3],
+                        "drive_initialized": bool(flags & 0x01),
+                        "feedback_ready": bool(flags & 0x02),
+                        "feedback_healthy": bool(flags & 0x04),
+                        "drive_faults": int.from_bytes(
+                            payload[5:7], "little"
+                        ),
+                        "drive_warnings": (
+                            int.from_bytes(payload[7:9], "little")
+                            if len(payload) == 14 else 0
+                        ),
+                        "driver_init_stage": payload[diagnostic_offset],
+                        "driver_rx_bytes": payload[diagnostic_offset + 1],
+                        "driver_complete_frames": payload[
+                            diagnostic_offset + 2
+                        ],
+                        "driver_increment_frames": payload[
+                            diagnostic_offset + 3
+                        ],
+                        "driver_configuration_ack_mask": payload[
+                            diagnostic_offset + 4
+                        ],
+                    }
+                )
+            return decoded
     if message.message_type == MessageType.ACK and len(payload) == 1:
         return {"kind": "ack", "acknowledged_type": payload[0]}
     if message.message_type == MessageType.NACK and len(payload) == 2:
