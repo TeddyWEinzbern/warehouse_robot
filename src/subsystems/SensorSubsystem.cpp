@@ -6,8 +6,8 @@ namespace robot {
 
 SensorSubsystem::SensorSubsystem()
     : snapshot_{}, state_(PingState::Idle), echoState_{}, activeGroup_(0),
-      nextGroup_(0), stateStartedUs_(0), echoStartedUs_{0, 0, 0, 0, 0, 0},
-      offsetsMm_{0, 0, 0, 0, 0, 0} {}
+      nextGroup_(0), stateStartedUs_(0),
+      echoStartedUs_{0, 0, 0, 0, 0, 0} {}
 
 void SensorSubsystem::begin() {
     for (uint8_t group = 0; group < pins::SonarGroupCount; ++group) {
@@ -25,22 +25,20 @@ void SensorSubsystem::storeDistance(
     const uint8_t slot = pins::SonarSlot[sensor];
     DistancePair &pair = snapshot_.directions[direction];
     DistanceReading &reading = slot == 0 ? pair.first : pair.second;
-    int32_t adjusted = static_cast<int32_t>(millimetres) + offsetsMm_[sensor];
-    if (adjusted < 1 || adjusted > 65535) valid = false;
-    reading.millimetres = valid ? static_cast<uint16_t>(adjusted) : 0;
+    if (millimetres == 0) valid = false;
+    reading.millimetres = valid ? millimetres : 0;
     reading.updatedAtMs = nowMs;
     reading.valid = valid;
     if (pair.count < slot + 1) pair.count = slot + 1;
 }
 
 bool SensorSubsystem::startNextGroup(
-    uint32_t, uint32_t nowUs, const RuntimeConfig &runtime
+    uint32_t, uint32_t nowUs
 ) {
     if (state_ != PingState::Idle) return false;
     activeGroup_ = nextGroup_;
     nextGroup_ = static_cast<uint8_t>((nextGroup_ + 1U) % pins::SonarGroupCount);
     for (uint8_t sensor = 0; sensor < pins::SonarCount; ++sensor) {
-        offsetsMm_[sensor] = runtime.sensorOffsetMm[sensor];
         echoState_[sensor] = pins::SonarGroup[sensor] == activeGroup_
             ? EchoState::WaitRise : EchoState::Inactive;
     }

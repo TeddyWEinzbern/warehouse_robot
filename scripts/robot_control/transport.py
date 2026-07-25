@@ -27,7 +27,7 @@ def list_ports() -> list[str]:
 def open_port(device: str, baud: int):
     if not device:
         raise SerialConnectionError("serial device is required")
-    if baud not in (9600, 38400, 115200):
+    if baud not in (9600, 38400):
         raise SerialConnectionError(f"unsupported baud rate: {baud}")
     serial = require_serial()
     try:
@@ -35,7 +35,7 @@ def open_port(device: str, baud: int):
             device,
             baud,
             timeout=0,
-            # A 50 ms deadline is too aggressive for an RFCOMM-backed HC-05.
+            # A 50 ms deadline is too aggressive for an RFCOMM-backed HC-06.
             # The operating system may briefly buffer a complete protocol frame
             # while the Bluetooth link is being scheduled or re-established.
             write_timeout=0.5,

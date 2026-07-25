@@ -49,7 +49,9 @@ class SnapshotHub:
     async def start(self) -> None:
         if self.task is not None:
             return
-        self.task = asyncio.create_task(self._broadcast(), name="telemetry-snapshot-hub")
+        self.task = asyncio.create_task(
+            self._broadcast(), name="critical-status-snapshot-hub"
+        )
 
     async def close(self) -> None:
         if self.task:
@@ -172,22 +174,10 @@ def create_app(runtime: RobotRuntime):
     async def action(request: Any):
         body = await json_object(request)
         name = body.get("action")
-        allowed = {"arm", "disarm", "estop", "clear_estop", "clear_fault", "refresh_parameters"}
+        allowed = {"arm", "disarm", "estop", "clear_estop", "clear_fault"}
         if name not in allowed:
             raise web.HTTPBadRequest(text="unsupported action")
         if not runtime.submit(name):
-            raise web.HTTPServiceUnavailable(text="runtime command queue is full")
-        return web.json_response({"accepted": True})
-
-    async def parameter(request: Any):
-        body = await json_object(request)
-        if not isinstance(body.get("group"), str) or not isinstance(body.get("values"), dict):
-            raise web.HTTPBadRequest(text="group and values are required")
-        accepted = runtime.submit(
-            "set_host_input" if body["group"] == "HOST_INPUT" else "set_parameter",
-            {"group": body["group"], "index": body.get("index", 0), "values": body["values"]},
-        )
-        if not accepted:
             raise web.HTTPServiceUnavailable(text="runtime command queue is full")
         return web.json_response({"accepted": True})
 
@@ -267,7 +257,6 @@ def create_app(runtime: RobotRuntime):
     app.router.add_get("/", index)
     app.router.add_get("/api/snapshot", snapshot)
     app.router.add_post("/api/action", action)
-    app.router.add_post("/api/parameter", parameter)
     app.router.add_get("/ws", websocket)
     app.router.add_static("/static", STATIC_ROOT)
     app.on_startup.append(startup)

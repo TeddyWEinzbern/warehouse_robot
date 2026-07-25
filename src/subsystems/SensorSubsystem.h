@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 
-#include "domain/RuntimeConfig.h"
 #include "domain/RobotTypes.h"
 
 namespace robot {
@@ -12,7 +11,7 @@ class SensorSubsystem {
     SensorSubsystem();
     void begin();
     void poll(uint32_t nowMs, uint32_t nowUs);
-    bool startNextGroup(uint32_t nowMs, uint32_t nowUs, const RuntimeConfig &runtime);
+    bool startNextGroup(uint32_t nowMs, uint32_t nowUs);
     bool capturing() const;
     const SensorSnapshot &snapshot() const;
 
@@ -26,7 +25,6 @@ class SensorSubsystem {
     uint8_t nextGroup_;
     uint32_t stateStartedUs_;
     uint32_t echoStartedUs_[6];
-    int16_t offsetsMm_[6];
     void storeDistance(uint8_t sensor, uint16_t millimetres, uint32_t nowMs, bool valid);
     bool groupComplete() const;
 };

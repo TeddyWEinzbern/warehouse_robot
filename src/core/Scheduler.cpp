@@ -12,14 +12,14 @@ void saturatingAdd(uint16_t &value, uint32_t amount) {
 
 PeriodicTask::PeriodicTask()
     : periodUs_(0), deadlineUs_(0), lastRunUs_(0), lastLatenessUs_(0),
-      stats_({0, 0, 0}), started_(false) {}
+      stats_({0, 0}), started_(false) {}
 
 void PeriodicTask::start(uint32_t nowUs, uint32_t periodUs, uint32_t phaseUs) {
     periodUs_ = periodUs;
     deadlineUs_ = nowUs + phaseUs;
     lastRunUs_ = nowUs;
     lastLatenessUs_ = 0;
-    stats_ = {0, 0, 0};
+    stats_ = {0, 0};
     started_ = true;
 }
 
@@ -27,7 +27,6 @@ bool PeriodicTask::due(uint32_t nowUs) {
     if (!started_ || static_cast<int32_t>(nowUs - deadlineUs_) < 0) return false;
     const uint32_t lateness = nowUs - deadlineUs_;
     lastLatenessUs_ = lateness;
-    if (lateness > stats_.maxLatenessUs) stats_.maxLatenessUs = lateness;
     const uint32_t missedPeriods = periodUs_ == 0 ? 0 : lateness / periodUs_;
     if (missedPeriods > 0) {
         saturatingAdd(stats_.missed, missedPeriods);
@@ -55,14 +54,12 @@ uint32_t PeriodicTask::lastLatenessUs() const { return lastLatenessUs_; }
 const SchedulerTaskStats &PeriodicTask::stats() const { return stats_; }
 SchedulerTaskStats &PeriodicTask::stats() { return stats_; }
 
-SchedulerHealth::SchedulerHealth() : lastLoopUs_(0), maxLoopGapUs_(0) {}
-void SchedulerHealth::begin(uint32_t nowUs) { lastLoopUs_ = nowUs; maxLoopGapUs_ = 0; }
+SchedulerHealth::SchedulerHealth() : lastLoopUs_(0) {}
+void SchedulerHealth::begin(uint32_t nowUs) { lastLoopUs_ = nowUs; }
 bool SchedulerHealth::observeLoop(uint32_t nowUs, bool armed) {
     const uint32_t gap = nowUs - lastLoopUs_;
     lastLoopUs_ = nowUs;
-    if (gap > maxLoopGapUs_) maxLoopGapUs_ = gap;
     return armed && gap > config::MaxLoopGapUs;
 }
-uint32_t SchedulerHealth::maxLoopGapUs() const { return maxLoopGapUs_; }
 
 } // namespace robot

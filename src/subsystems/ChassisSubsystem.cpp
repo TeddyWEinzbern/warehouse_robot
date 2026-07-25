@@ -1,6 +1,5 @@
 #include "subsystems/ChassisSubsystem.h"
 
-#include "app/BuildConfig.h"
 #include "domain/MecanumKinematics.h"
 
 namespace robot {
@@ -15,15 +14,6 @@ int16_t approach(int16_t current, int16_t target, int32_t step) {
     return target;
 }
 bool oppositeSigns(int16_t a, int16_t b) { return (a < 0 && b > 0) || (a > 0 && b < 0); }
-uint16_t profiled(uint16_t value, uint16_t multiplierPermille, uint16_t hardMaximum) {
-    const uint32_t scaled = static_cast<uint32_t>(value) * multiplierPermille / 1000UL;
-    return static_cast<uint16_t>(scaled > hardMaximum ? hardMaximum : scaled);
-}
-int16_t speedProfiled(int16_t value, uint16_t multiplierPermille) {
-    return static_cast<int16_t>(
-        static_cast<int32_t>(value) * multiplierPermille / 1000L
-    );
-}
 }
 
 ChassisSubsystem::ChassisSubsystem(DriveBackend &backend)
@@ -38,24 +28,18 @@ int16_t ChassisSubsystem::scaleAxis(int16_t input, int16_t positiveMaximum, int1
 }
 
 void ChassisSubsystem::setDesired(const DriveIntent &intent, const RuntimeConfig &runtime) {
-    const ResponseProfile profile = runtime.chassis.activeProfile;
-    const ResponseProfileDefinition &definition =
-        runtime.responseProfiles[static_cast<uint8_t>(profile)];
-    const int16_t forwardMaximum = speedProfiled(
-        runtime.chassis.maximumForwardMmS, definition.speedPermille
+    requested_.longitudinalMmS = scaleAxis(
+        intent.forward, runtime.chassis.maximumForwardMmS,
+        runtime.chassis.maximumReverseMmS
     );
-    const int16_t reverseMaximum = speedProfiled(
-        runtime.chassis.maximumReverseMmS, definition.speedPermille
+    requested_.lateralMmS = scaleAxis(
+        intent.strafe, runtime.chassis.maximumLateralMmS,
+        runtime.chassis.maximumLateralMmS
     );
-    const int16_t lateralMaximum = speedProfiled(
-        runtime.chassis.maximumLateralMmS, definition.speedPermille
+    requested_.yawMradS = scaleAxis(
+        intent.turn, runtime.chassis.maximumYawMradS,
+        runtime.chassis.maximumYawMradS
     );
-    const int16_t yawMaximum = speedProfiled(
-        runtime.chassis.maximumYawMradS, definition.speedPermille
-    );
-    requested_.longitudinalMmS = scaleAxis(intent.forward, forwardMaximum, reverseMaximum);
-    requested_.lateralMmS = scaleAxis(intent.strafe, lateralMaximum, lateralMaximum);
-    requested_.yawMradS = scaleAxis(intent.turn, yawMaximum, yawMaximum);
     requested_.longitudinalMmS = static_cast<int16_t>(
         static_cast<int32_t>(requested_.longitudinalMmS) * intent.maxMagnitudePermille / 1000L
     );
@@ -96,43 +80,22 @@ int16_t ChassisSubsystem::rampAxis(
 
 void ChassisSubsystem::trajectoryTick(uint32_t nowUs, uint32_t elapsedUs, const RuntimeConfig &runtime) {
     const ChassisAccelerationLimits &base = runtime.chassis.acceleration;
-    const ResponseProfile profile = runtime.chassis.activeProfile;
-    const ResponseProfileDefinition &definition =
-        runtime.responseProfiles[static_cast<uint8_t>(profile)];
     ramped_.longitudinalMmS = rampAxis(
         longitudinal_, requested_.longitudinalMmS,
-        profiled(base.forwardAccelMmS2, definition.accelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
-        profiled(base.reverseAccelMmS2, definition.accelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
-        profiled(base.forwardDecelMmS2, definition.decelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
-        profiled(base.reverseDecelMmS2, definition.decelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
+        base.forwardAccelMmS2, base.reverseAccelMmS2,
+        base.forwardDecelMmS2, base.reverseDecelMmS2,
         runtime.chassis.translationZeroThresholdMmS, base.zeroCrossingHoldMs, nowUs, elapsedUs
     );
     ramped_.lateralMmS = rampAxis(
         lateral_, requested_.lateralMmS,
-        profiled(base.lateralAccelMmS2, definition.accelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
-        profiled(base.lateralAccelMmS2, definition.accelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
-        profiled(base.lateralDecelMmS2, definition.decelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
-        profiled(base.lateralDecelMmS2, definition.decelerationPermille,
-                 config::HardMaxTranslationAccelerationMmS2),
+        base.lateralAccelMmS2, base.lateralAccelMmS2,
+        base.lateralDecelMmS2, base.lateralDecelMmS2,
         runtime.chassis.translationZeroThresholdMmS, base.zeroCrossingHoldMs, nowUs, elapsedUs
     );
     ramped_.yawMradS = rampAxis(
         yaw_, requested_.yawMradS,
-        profiled(base.rotationalAccelMradS2, definition.accelerationPermille,
-                 config::HardMaxRotationalAccelerationMradS2),
-        profiled(base.rotationalAccelMradS2, definition.accelerationPermille,
-                 config::HardMaxRotationalAccelerationMradS2),
-        profiled(base.rotationalDecelMradS2, definition.decelerationPermille,
-                 config::HardMaxRotationalAccelerationMradS2),
-        profiled(base.rotationalDecelMradS2, definition.decelerationPermille,
-                 config::HardMaxRotationalAccelerationMradS2),
+        base.rotationalAccelMradS2, base.rotationalAccelMradS2,
+        base.rotationalDecelMradS2, base.rotationalDecelMradS2,
         runtime.chassis.rotationZeroThresholdMradS, base.zeroCrossingHoldMs, nowUs, elapsedUs
     );
     const uint16_t wheelLimit = runtime.chassis.maximumWheelMmS;

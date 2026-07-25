@@ -1,7 +1,6 @@
 #pragma once
 
 #include "domain/RobotTypes.h"
-#include "domain/RuntimeConfig.h"
 
 namespace robot {
 
@@ -19,8 +18,7 @@ class SafetySupervisor {
     DriveIntent arbitrate(
         const OperatorControlFrame &frame,
         const AssistOutput &assist,
-        bool cargoMayBeHeld,
-        const RuntimeConfig &runtime
+        bool cargoMayBeHeld
     ) const;
     void latchFault(uint16_t fault);
     bool takeImmediateStop();

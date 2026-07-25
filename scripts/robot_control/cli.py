@@ -75,13 +75,12 @@ def parse_args() -> argparse.Namespace:
 
     run = subcommands.add_parser("run", help="Run the safety runtime and local dashboard")
     run.add_argument("--port", required=True)
-    run.add_argument("--baud", type=int, choices=(9600, 38400), default=38400)
+    run.add_argument("--baud", type=int, choices=(9600, 38400), default=9600)
     run.add_argument("--web-port", type=int, default=8765)
-    run.add_argument("--no-gamepad", action="store_true", help="Telemetry/tuning only")
     run.add_argument(
-        "--one-way",
+        "--no-gamepad",
         action="store_true",
-        help="Send controls without requiring firmware telemetry (unverified/degraded)",
+        help="Read-only safety monitor; ARM remains disabled",
     )
     run.add_argument("--reconnect-attempts", type=int, default=10)
 
@@ -98,7 +97,7 @@ def parse_args() -> argparse.Namespace:
         "--baud",
         type=int,
         choices=(9600, 38400),
-        default=38400,
+        default=9600,
         help="Host-link baud; must match ROBOT_HOST_BAUD of the calibration build",
     )
     return parser.parse_args()
@@ -135,22 +134,14 @@ def run(args: argparse.Namespace) -> int:
         ) from exc
 
     # Reserve the listener before even enumerating serial devices: an occupied
-    # dashboard port must have no effect on the HC-05 or RobotRuntime.
+    # dashboard port must have no effect on the HC-06 or RobotRuntime.
     with closing(dashboard_socket):
         validate_serial_device(args.port)
-        if args.one_way:
-            print(
-                "WARNING: --one-way keeps the serial link unverified; "
-                "telemetry and runtime parameter operations are unavailable.",
-                file=sys.stderr,
-                flush=True,
-            )
         runtime = RobotRuntime(
             args.port,
             args.baud,
             use_gamepad=not args.no_gamepad,
             maximum_reconnect_attempts=args.reconnect_attempts,
-            one_way=args.one_way,
         )
         print(f"Dashboard: http://127.0.0.1:{args.web_port}")
         web.run_app(create_app(runtime), sock=dashboard_socket)

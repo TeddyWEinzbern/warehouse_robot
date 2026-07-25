@@ -32,6 +32,11 @@ MotorBoardFeedResult MotorBoardFrameParser::feed(char value) {
     return MotorBoardFeedResult::Overflow;
 }
 
+void MotorBoardFrameParser::reset() {
+    length_ = 0;
+    collecting_ = false;
+}
+
 const char *MotorBoardFrameParser::frame() const { return buffer_; }
 uint16_t MotorBoardFrameParser::overflows() const { return overflows_; }
 
@@ -70,12 +75,6 @@ bool MotorBoardFrameParser::parseFour(
             )) return false;
     }
     return *cursor == '\0';
-}
-
-bool MotorBoardFrameParser::parseOne(
-    const char *cursor, int32_t &value, int32_t minimum, int32_t maximum
-) {
-    return parseInteger(cursor, value, minimum, maximum, '!') && *cursor == '\0';
 }
 
 } // namespace robot

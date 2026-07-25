@@ -2,6 +2,7 @@ import asyncio
 from contextlib import redirect_stderr
 import io
 import json
+from pathlib import Path
 import socket
 import sys
 import unittest
@@ -151,6 +152,67 @@ class BackgroundTaskTests(unittest.IsolatedAsyncioTestCase):
             await runner.setup()
         self.assertEqual(runtime.stops, 1)
         self.assertIsNone(app["hub"].task)
+
+
+class MinimalSafetySurfaceTests(unittest.IsolatedAsyncioTestCase):
+    def test_static_dashboard_has_two_controls_and_no_tuning_surface(self):
+        static_root = (
+            Path(__file__).parents[1]
+            / "scripts"
+            / "robot_control"
+            / "web_static"
+        )
+        html = (static_root / "index.html").read_text()
+        javascript = (static_root / "app.js").read_text()
+        self.assertEqual(html.count("<button"), 2)
+        self.assertNotIn("Runtime parameters", html)
+        self.assertNotIn("/api/parameter", javascript)
+        self.assertNotIn("refresh_parameters", javascript)
+
+    async def test_only_safety_actions_are_exposed(self):
+        class ActionRuntime:
+            def __init__(self):
+                self.actions = []
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def snapshot_json(self):
+                return "{}"
+
+            def submit(self, action):
+                self.actions.append(action)
+                return True
+
+        runtime = ActionRuntime()
+        runner = web.AppRunner(create_app(runtime))
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with ClientSession() as session:
+                accepted = await session.post(
+                    f"http://127.0.0.1:{port}/api/action",
+                    json={"action": "estop"},
+                )
+                removed = await session.post(
+                    f"http://127.0.0.1:{port}/api/action",
+                    json={"action": "refresh_parameters"},
+                )
+                parameter = await session.post(
+                    f"http://127.0.0.1:{port}/api/parameter",
+                    json={"group": "SERVO", "values": {}},
+                )
+                self.assertEqual(accepted.status, 200)
+                self.assertEqual(removed.status, 400)
+                self.assertEqual(parameter.status, 404)
+                self.assertEqual(runtime.actions, ["estop"])
+        finally:
+            await runner.cleanup()
 
 
 class WebsocketShutdownTests(unittest.IsolatedAsyncioTestCase):

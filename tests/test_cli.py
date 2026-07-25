@@ -10,16 +10,13 @@ from robot_control import cli
 from robot_control.transport import SerialConnectionError
 
 
-def run_args(
-    port: str, web_port: int = 8765, *, one_way: bool = False
-) -> argparse.Namespace:
+def run_args(port: str, web_port: int = 8765) -> argparse.Namespace:
     return argparse.Namespace(
         command="run",
         port=port,
-        baud=38400,
+        baud=9600,
         web_port=web_port,
         no_gamepad=True,
-        one_way=one_way,
         reconnect_attempts=2,
     )
 
@@ -28,13 +25,13 @@ class SerialDeviceValidationTests(unittest.TestCase):
     def test_macos_missing_dev_prefix_has_actionable_error(self):
         with patch(
             "robot_control.cli.list_ports",
-            return_value=["/dev/cu.HC-05 - HC-05 Bluetooth serial"],
+            return_value=["/dev/cu.HC-06 - HC-06 Bluetooth serial"],
         ):
             with self.assertRaisesRegex(
                 SerialConnectionError,
-                r"use the full path '/dev/cu\.HC-05'.*'/dev/' prefix is required",
+                r"use the full path '/dev/cu\.HC-06'.*'/dev/' prefix is required",
             ):
-                cli.validate_serial_device("cu.HC-05", platform="darwin")
+                cli.validate_serial_device("cu.HC-06", platform="darwin")
 
     def test_windows_com_port_validation_is_case_insensitive(self):
         with patch(
@@ -75,7 +72,7 @@ class SerialDeviceValidationTests(unittest.TestCase):
 
 
 class DashboardStartupTests(unittest.TestCase):
-    def test_parser_accepts_explicit_one_way_flag(self):
+    def test_parser_defaults_to_hc06_baud_and_rejects_one_way(self):
         with patch(
             "sys.argv",
             [
@@ -83,33 +80,40 @@ class DashboardStartupTests(unittest.TestCase):
                 "run",
                 "--port",
                 "/dev/cu.test",
-                "--one-way",
             ],
         ):
             args = cli.parse_args()
-        self.assertTrue(args.one_way)
+        self.assertEqual(args.baud, 9600)
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "warehouse-robot",
+                    "run",
+                    "--port",
+                    "/dev/cu.test",
+                    "--one-way",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            cli.parse_args()
 
-    def test_one_way_flag_is_passed_to_runtime_and_warns_on_stderr(self):
-        stderr = io.StringIO()
+    def test_runtime_receives_only_verified_link_options(self):
         with (
             patch("robot_control.cli.validate_serial_device"),
             patch("robot_control.cli.RobotRuntime") as runtime_class,
             patch("robot_control.web.reserve_dashboard_socket"),
             patch("robot_control.web.create_app", return_value=object()),
             patch("aiohttp.web.run_app"),
-            redirect_stderr(stderr),
         ):
-            cli.run(run_args("/dev/cu.test", one_way=True))
-
+            cli.run(run_args("/dev/cu.test"))
         runtime_class.assert_called_once_with(
             "/dev/cu.test",
-            38400,
+            9600,
             use_gamepad=False,
             maximum_reconnect_attempts=2,
-            one_way=True,
         )
-        self.assertIn("WARNING: --one-way", stderr.getvalue())
-        self.assertIn("unverified", stderr.getvalue())
 
     def test_occupied_web_port_never_constructs_or_starts_runtime(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:

@@ -17,7 +17,7 @@ AssistOutput AssistSubsystem::update(
     const RuntimeConfig &runtime
 ) {
     AssistOutput output = {
-        {0, 0, 0, runtime.assistDriveLimitPermille, IntentSource::Assist},
+        {0, 0, 0, config::AssistDriveLimitPermille, IntentSource::Assist},
         0.0F, stage_, false, false
     };
     if (frame.pressed & StartAssist) { stage_ = AssistStage::Align; startedAtMs_ = nowMs; }
@@ -52,8 +52,8 @@ AssistOutput AssistSubsystem::update(
             pair.second.millimetres;
         if (absolute(difference) > static_cast<int>(config::AlignmentToleranceMm)) {
             output.drive.turn = difference > 0
-                ? -static_cast<int16_t>(runtime.assistDriveLimitPermille)
-                : static_cast<int16_t>(runtime.assistDriveLimitPermille);
+                ? -static_cast<int16_t>(config::AssistDriveLimitPermille)
+                : static_cast<int16_t>(config::AssistDriveLimitPermille);
             output.driveActive = true;
             output.stage = stage_;
             return output;
@@ -66,7 +66,8 @@ AssistOutput AssistSubsystem::update(
     if (distance > runtime.arm.maximumReachMm + runtime.arm.gripperLengthOffsetMm) {
         stage_ = AssistStage::Complete;
     } else if (distance < config::MinAssistDistanceMm) {
-        const int16_t away = -static_cast<int16_t>(runtime.assistDriveLimitPermille);
+        const int16_t away =
+            -static_cast<int16_t>(config::AssistDriveLimitPermille);
         if (direction == static_cast<uint8_t>(SensorDirection::Front)) output.drive.forward = away;
         else output.drive.strafe = direction == static_cast<uint8_t>(SensorDirection::Left) ? -away : away;
         output.driveActive = true;
