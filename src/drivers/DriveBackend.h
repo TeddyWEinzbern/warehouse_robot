@@ -13,7 +13,9 @@ class DriveBackend {
     virtual void setWheelTargets(const WheelTargets &targets) = 0;
     virtual void onMotorDeadline(uint32_t nowMs, bool armed, const RuntimeConfig &runtime) = 0;
     virtual void onEncoderDeadline(uint32_t nowMs, const RuntimeConfig &runtime) = 0;
+#if ROBOT_CALIBRATION
     virtual void onEncoderTotalDeadline(uint32_t nowMs) = 0;
+#endif
     virtual void stop(uint32_t nowMs) = 0;
     virtual const DriveFeedback &feedback() const = 0;
     virtual DriveHealth health(uint32_t nowMs) const = 0;

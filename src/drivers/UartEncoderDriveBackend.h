@@ -16,7 +16,9 @@ class UartEncoderDriveBackend : public DriveBackend {
     void setWheelTargets(const WheelTargets &targets);
     void onMotorDeadline(uint32_t nowMs, bool armed, const RuntimeConfig &runtime);
     void onEncoderDeadline(uint32_t nowMs, const RuntimeConfig &runtime);
+#if ROBOT_CALIBRATION
     void onEncoderTotalDeadline(uint32_t nowMs);
+#endif
     void stop(uint32_t nowMs);
 #if ROBOT_CALIBRATION
     // Spins one motor board channel while DISARMED for the calibration
@@ -38,7 +40,13 @@ class UartEncoderDriveBackend : public DriveBackend {
         Settling, MotorType, EncoderPolarity, QualificationDelay,
         Qualifying, RetryWait, Ready
     };
-    enum class QueryType : uint8_t { None, EncoderIncrement, EncoderTotal };
+    enum class QueryType : uint8_t {
+        None,
+        EncoderIncrement,
+#if ROBOT_CALIBRATION
+        EncoderTotal,
+#endif
+    };
 
     HardwareSerial &serial_;
     DriveFeedback feedback_;
@@ -48,8 +56,9 @@ class UartEncoderDriveBackend : public DriveBackend {
     uint32_t startedAtMs_;
     uint32_t querySentAtMs_;
     uint32_t lastZeroAtMs_;
-    uint32_t lastEncoderCompletedAtMs_;
-    uint32_t lastEncoderDeadlineAtMs_;
+#if ROBOT_CALIBRATION
+    bool totalDue_;
+#endif
     uint32_t badSignSinceMs_[4];
     uint32_t stallSinceMs_[4];
     uint32_t mismatchSinceMs_[4];
@@ -58,8 +67,8 @@ class UartEncoderDriveBackend : public DriveBackend {
     int16_t previousMeasuredMmS_[4];
     uint16_t faults_;
     uint8_t consecutiveMalformed_;
+    uint8_t consecutiveTimeouts_;
     uint8_t implausibleSamples_;
-    uint8_t unchangedTotalFrames_[4];
     MotorBoardFrameParser parser_;
 #if ROBOT_CALIBRATION
     uint32_t calibrationUntilMs_;
@@ -73,7 +82,6 @@ class UartEncoderDriveBackend : public DriveBackend {
     bool pendingZero_;
     bool pendingMotor_;
     bool encoderDue_;
-    bool totalDue_;
 
     bool tryWrite(const char *data, uint8_t length);
     bool tryWriteLiteral(const __FlashStringHelper *value, uint8_t length);
@@ -92,11 +100,9 @@ class UartEncoderDriveBackend : public DriveBackend {
         const RuntimeConfig &runtime
     );
     void acceptEncoder(const int32_t *values, uint32_t nowMs, const RuntimeConfig &runtime);
-    void acceptTotals(
-        const int32_t *values,
-        uint32_t nowMs,
-        const RuntimeConfig &runtime
-    );
+#if ROBOT_CALIBRATION
+    void acceptTotals(const int32_t *values);
+#endif
     void updateWheelHealth(uint8_t wheel, uint32_t nowMs);
     void markMalformed();
 };

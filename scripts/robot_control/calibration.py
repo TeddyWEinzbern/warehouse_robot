@@ -182,13 +182,16 @@ class CalibrationSession:
         # drain the complete E-stop burst before the first timed control so
         # the next control cannot become a short-interval queued frame.
         self.sleep(queued_bytes * 10.0 / self.baud)
+        # Verify the firmware personality while it is still fail-closed.
+        # A mistaken connection to the production image must never receive
+        # control traffic or CLEAR_ESTOP from the calibration client.
+        self._send(MessageType.HELLO)
+        self._await_hello()
         self._send_neutral_stream(STARTUP_NEUTRAL_SECONDS)
         # CLEAR_ESTOP returns a fault-free calibration image to DISARMED.
         # Do not queue DISARM beside it: firmware intentionally gives DISARM
         # dominance within one receive batch, which would suppress the clear.
         self._send(MessageType.CLEAR_ESTOP)
-        self._send(MessageType.HELLO)
-        self._await_hello()
 
     def _next_sequence(self) -> int:
         self.sequence = (self.sequence + 1) % 256

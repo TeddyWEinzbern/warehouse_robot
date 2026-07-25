@@ -14,6 +14,16 @@
 
 class __FlashStringHelper;
 
+class Stream {
+  public:
+    virtual int available() = 0;
+    virtual int read() = 0;
+    virtual size_t write(uint8_t value) = 0;
+
+  protected:
+    ~Stream() {}
+};
+
 inline uint32_t &arduinoFakeMillisStorage() {
     static uint32_t value = 0;
     return value;
@@ -24,7 +34,7 @@ inline void arduinoSetMillis(uint32_t value) {
     arduinoFakeMillisStorage() = value;
 }
 
-class HardwareSerial {
+class HardwareSerial : public Stream {
   public:
     HardwareSerial() : baud_(0), writable_(255), receive_(), transmit_() {}
 
@@ -36,12 +46,16 @@ class HardwareSerial {
         );
         return length;
     }
+    size_t write(uint8_t value) {
+        transmit_.push_back(static_cast<char>(value));
+        return 1;
+    }
     size_t print(const __FlashStringHelper *value) {
         const char *text = reinterpret_cast<const char *>(value);
         transmit_.append(text);
         return strlen(text);
     }
-    int available() const {
+    int available() {
         return static_cast<int>(receive_.size());
     }
     int read() {
@@ -54,6 +68,10 @@ class HardwareSerial {
     void queueReceive(const char *text) {
         while (*text != '\0')
             receive_.push_back(static_cast<uint8_t>(*text++));
+    }
+    void queueReceive(const uint8_t *data, size_t length) {
+        for (size_t index = 0; index < length; ++index)
+            receive_.push_back(data[index]);
     }
     const std::string &transmit() const { return transmit_; }
     void clearTransmit() { transmit_.clear(); }

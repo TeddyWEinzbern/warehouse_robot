@@ -49,7 +49,9 @@ class RobotApplication {
     PeriodicTask servoTask_;
     PeriodicDeadline encoderTask_;
     PeriodicDeadline sonarTask_;
+#if ROBOT_CALIBRATION
     PeriodicDeadline encoderTotalTask_;
+#endif
     PeriodicDeadline statusTask_;
     uint32_t lastControlReceivedUs_;
     uint32_t missWindowStartedUs_;
@@ -74,7 +76,9 @@ class RobotApplication {
     bool sonarEnabled() const;
     bool armMotionEnabled() const;
     bool hostTransmitSafe(uint32_t nowUs) const;
+#if ROBOT_CALIBRATION
     void processHostMessages(uint32_t nowMs);
+#endif
     void enforceSafetyStop(uint32_t nowMs);
     void updateMotionIntent(uint32_t nowMs);
     void runDueTasks(uint32_t nowMs, uint32_t nowUs);
@@ -83,10 +87,12 @@ class RobotApplication {
     void serviceHostTransmit(uint32_t nowMs, uint32_t nowUs);
     bool sendHello();
     bool sendCriticalStatus(uint32_t nowMs);
+#if ROBOT_CALIBRATION
     bool sendCalibrationReport(
         const PendingCalibrationRead &request,
         uint32_t nowMs
     );
+#endif
 };
 
 } // namespace robot

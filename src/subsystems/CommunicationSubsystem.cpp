@@ -12,6 +12,7 @@ constexpr uint8_t ControlRawLength = 9;
 constexpr uint8_t EStopRawLength = 2;
 constexpr uint8_t AllowedButtons = 0x3F;
 
+#if ROBOT_CALIBRATION
 int16_t readI16(const uint8_t *data) {
     return static_cast<int16_t>(
         static_cast<uint16_t>(data[0]) |
@@ -23,11 +24,16 @@ uint16_t readU16(const uint8_t *data) {
     return static_cast<uint16_t>(data[0]) |
            (static_cast<uint16_t>(data[1]) << 8);
 }
+#endif
 } // namespace
 
 CommunicationSubsystem::CommunicationSubsystem()
-    : latest_({}), requests_({0}), armMove_({}), jointReference_({}),
-      driveCalibration_({}), calibrationRead_({}), previousButtons_(0),
+    : latest_({}), requests_({0}),
+#if ROBOT_CALIBRATION
+      armMove_({}), jointReference_({}), driveCalibration_({}),
+      calibrationRead_({}),
+#endif
+      previousButtons_(0),
       encoded_{}, raw_{}, transmit_{}, encodedLength_(0),
       transmitLength_(0), transmitOffset_(0), discarding_(false) {}
 
@@ -142,9 +148,11 @@ void CommunicationSubsystem::acceptGeneric(uint8_t length) {
         return;
 
     const MessageType type = static_cast<MessageType>(raw_[1]);
-    const uint8_t sequence = raw_[2];
     const uint8_t payloadLength = raw_[3];
+#if ROBOT_CALIBRATION
+    const uint8_t sequence = raw_[2];
     const uint8_t *payload = raw_ + 4;
+#endif
     switch (type) {
         case MessageType::Hello:
             if (payloadLength == 0) requests_.flags |= RequestHello;
@@ -161,6 +169,7 @@ void CommunicationSubsystem::acceptGeneric(uint8_t length) {
         case MessageType::ClearFault:
             if (payloadLength == 0) requests_.flags |= RequestClearFault;
             break;
+#if ROBOT_CALIBRATION
         case MessageType::CalibrationArmMove:
             if (payloadLength == 2 && !armMove_.valid) {
                 armMove_ = {true, payload[0], payload[1], sequence};
@@ -195,7 +204,6 @@ void CommunicationSubsystem::acceptGeneric(uint8_t length) {
                 calibrationRead_ = {true, type, 0, sequence};
             }
             break;
-#if ROBOT_CALIBRATION
         case MessageType::CalibrationReadSystem:
             if (payloadLength == 0 && !calibrationRead_.valid) {
                 calibrationRead_ = {true, type, 0, sequence};
@@ -275,6 +283,7 @@ bool CommunicationSubsystem::sendFrame(
     return true;
 }
 
+#if ROBOT_CALIBRATION
 bool CommunicationSubsystem::sendAck(
     uint8_t sequence, MessageType acknowledged
 ) {
@@ -290,6 +299,7 @@ bool CommunicationSubsystem::sendNack(
     };
     return sendFrame(MessageType::Nack, sequence, payload, sizeof(payload));
 }
+#endif
 
 const OperatorControlFrame &CommunicationSubsystem::latest() const {
     return latest_;
@@ -301,6 +311,7 @@ ControlRequests CommunicationSubsystem::takeRequests() {
     return result;
 }
 
+#if ROBOT_CALIBRATION
 bool CommunicationSubsystem::takeArmMove(PendingArmMove &command) {
     if (!armMove_.valid) return false;
     command = armMove_;
@@ -334,6 +345,7 @@ bool CommunicationSubsystem::takeCalibrationRead(
     calibrationRead_.valid = false;
     return true;
 }
+#endif
 
 void CommunicationSubsystem::pumpTransmit(
     Stream &stream, uint8_t byteBudget

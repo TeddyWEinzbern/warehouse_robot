@@ -126,8 +126,11 @@ independent transmit sequence.
 ARM, DISARM, clear-E-stop, and clear-fault are distinct safety requests. They
 do not generate ACK/NACK traffic; the host confirms their effect only from a
 fresh critical-status message. ACK/NACK is reserved for calibration
-transactions, and no accepted command makes another safety transition
-implicit.
+transactions in the `calibration` image, and no accepted command makes
+another safety transition implicit. The production image silently ignores
+message types `0x10` through `0x16`; it does not retain calibration pending
+state or emit calibration ACK/NACK replies. The calibration host verifies
+HELLO profile `7` before it sends any calibration command.
 
 ### Generic payload layouts
 
@@ -237,8 +240,9 @@ Uno's reverse-direction window.
 ## Calibration-only reports
 
 Calibration commands are accepted only by the `calibration` image, while
-DISARMED, and only for the corresponding enabled subsystem. Every actuator
-request remains bounded by compiled limits.
+DISARMED, and only for the corresponding enabled subsystem. The production
+image ignores those message types without replying. Every actuator request
+remains bounded by compiled limits.
 
 - Arm movement and joint-reference commands use the protected arm path.
 - The first command for every servo must be raw 90 degrees; both host and
@@ -371,26 +375,33 @@ measurement of live stack headroom.
 | Image | Flash | Static SRAM | Static free |
 | --- | ---: | ---: | ---: |
 | v2 closed-loop robot (`ba4b8ad`) | 31,668 B (98.2%) | 1,812 B (88.5%) | 236 B |
-| v3 robot, unqualified default | 19,794 B (61.4%) | 1,367 B (66.7%) | 681 B |
-| v3 qualified closed-loop robot | 29,226 B (90.6%) | 1,371 B (66.9%) | 677 B |
-| v3 qualified robot + sonar | 31,252 B (96.9%) | 1,391 B (67.9%) | 657 B |
+| v3 drive-only qualified default | 18,490 B (57.3%) | 1,307 B (63.8%) | 741 B |
+| v3 qualified closed-loop robot | 28,134 B (87.2%) | 1,311 B (64.0%) | 737 B |
+| v3 qualified robot + sonar | 30,246 B (93.8%) | 1,331 B (65.0%) | 717 B |
 | v2 calibration (`ba4b8ad`) | 31,844 B (98.7%) | 1,835 B (89.6%) | 213 B |
-| v3 calibration | 22,624 B (70.1%) | 1,465 B (71.5%) | 583 B |
+| v3 calibration | 22,942 B (71.1%) | 1,457 B (71.1%) | 591 B |
 
 The fair production comparison is v2 closed-loop against v3 qualified
-closed-loop: flash falls by 2,442 bytes (7.7%), static SRAM by 441 bytes
-(24.3%), and static free SRAM rises from 236 to 677 bytes. The unqualified
-default is intentionally not used for that comparison because link-time
-optimization can remove motion paths made unreachable by calibration gates.
-For calibration, flash falls by 9,220 bytes (29.0%) and static SRAM by
-370 bytes (20.2%).
+closed-loop: flash falls by 3,534 bytes (11.2%), static SRAM by 501 bytes
+(27.6%), and static free SRAM rises from 236 to 737 bytes. The drive-only
+default is intentionally not used for that comparison because disabled arm
+paths make it a different feature set. For calibration, flash falls by
+8,902 bytes (28.0%) and static SRAM by 378 bytes (20.6%).
+
+The production-only pruning removes calibration command state/ACK handling
+and the unused periodic encoder-total path. At that measured step it reduced
+the worst-case sonar image from 31,746-byte/1,394-byte to
+30,076-byte/1,330-byte: 1,670 bytes of Flash and 64 bytes of SRAM recovered.
+The subsequent timeout hardening adds 170 bytes of Flash and one byte of
+static SRAM to that image. Calibration retains encoder-total queries and
+reports.
 
 The linked v3 matrix contains no application-visible `malloc`, `calloc`,
 `realloc`, `free`, or C++ allocator symbols. The 256-byte live watermark gate
 still applies because static free SRAM does not include worst-case call
 frames, interrupt nesting, or library stack use. The sonar-enabled production
-variant has only 1,004 bytes of flash remaining; keep that build in CI and
-treat any material growth as a resource review trigger.
+variant has 2,010 bytes of flash remaining; keep that build in CI and treat
+any material growth as a resource review trigger.
 
 ## Motor-board UART contract
 
@@ -399,7 +410,8 @@ The motor board is independent of the HC-06 host protocol:
 - `$Car:` carries four A/B/C/D closed-loop speed targets in m/s.
 - `$Car_Pwm:` carries four signed open-loop percentage targets.
 - `$MOTOR_4CH_READ:encoder_20ms!` requests encoder increments.
-- encoder-total requests are serialized through the same parser.
+- calibration-only encoder-total requests are serialized through the same
+  parser; production health and stall checks use the 20 ms increments.
 - DISARM, link loss, E-stop, disabled drive, and drive faults converge on
   `$Car:0,0,0,0!`.
 - Startup sends the vendor motor-type and encoder-polarity commands, then
@@ -411,6 +423,18 @@ The motor board is independent of the HC-06 host protocol:
   repeats the zero-motor frame, and retries the complete initialization
   sequence after 10 seconds. It does not require a reset or latch a
   clear-before-retry initialization fault.
+- Routine queries use a 30 ms reply window. The captured vendor-board samples
+  completed in at most about 24.9 ms from the first request byte, so this
+  setting leaves measured margin but is not a claimed hardware upper bound.
+- One routine increment timeout discards only that in-flight query and any
+  partial frame. It preserves the last valid sample and timestamp, drops an
+  already-coalesced immediate requery, and does not count as malformed data.
+  The receiver can consume the longest supported 73-byte reply in one pass.
+- A matching increment reply breaks the no-response streak. Three consecutive
+  increment timeouts, or a last-valid-sample age of 100 ms, latches
+  `encoder stale` and makes feedback invalid. A fresh valid reply restores
+  feedback health, but the fault remains latched until explicitly cleared.
+  Malformed and implausible replies retain their separate fault paths.
 
 The driver-board UART remains compiled and allocated in shipped Uno images.
 `ROBOT_DRIVE_ENABLED=0` prevents initialization, polling, and commands; it does

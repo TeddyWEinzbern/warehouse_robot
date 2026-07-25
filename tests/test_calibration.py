@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 import unittest
 
-from robot_control.calibration import CalibrationSession
+from robot_control.calibration import CalibrationError, CalibrationSession
 from robot_control.protocol import (
     CalibrationReportKind,
     MessageType,
@@ -337,14 +337,44 @@ class MotorCommandTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(controls), 22)
         self.assertEqual(
-            [message.message_type for message in messages[-2:]],
-            [MessageType.CLEAR_ESTOP, MessageType.HELLO],
+            messages[3].message_type, MessageType.HELLO
+        )
+        self.assertEqual(
+            messages[-1].message_type, MessageType.CLEAR_ESTOP
         )
         self.assertNotIn(
             MessageType.DISARM,
             [message.message_type for message in messages[3:]],
         )
         self.assertEqual(session.hello["profile"], 7)
+
+    def test_start_rejects_robot_profile_before_calibration_commands(self):
+        class RobotProfileLink(FakeLink):
+            def write(self, data: bytes) -> int:
+                self.written.append(data)
+                message = decode_message(data)
+                if message.message_type == MessageType.HELLO:
+                    self._pending += encode_message(
+                        MessageType.HELLO_RESPONSE,
+                        0,
+                        bytes((3, 0, 1, 0, 2, 0, 1, 8)),
+                    )
+                return len(data)
+
+        link = RobotProfileLink()
+        session, _ = make_session(link)
+        with self.assertRaisesRegex(
+            CalibrationError, "not the `calibration` image"
+        ):
+            session.start()
+
+        self.assertEqual(
+            [
+                decode_message(packet).message_type
+                for packet in link.written
+            ],
+            [MessageType.ESTOP_ASSERT] * 3 + [MessageType.HELLO],
+        )
 
     def test_start_drains_estop_burst_before_timed_control_stream(self):
         timeline = ManualClock()

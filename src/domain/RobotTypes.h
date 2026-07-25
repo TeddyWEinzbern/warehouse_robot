@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "app/BuildConfig.h"
+
 namespace robot {
 
 enum Button : uint16_t {
@@ -127,11 +129,13 @@ struct SensorSnapshot { DistancePair directions[3]; };
 
 struct DriveFeedback {
     int16_t rawIncrement[4];
-    int32_t total[4];
     int16_t measuredMmS[4];
     uint32_t incrementUpdatedAtMs;
     uint8_t encoderValidMask;
+#if ROBOT_CALIBRATION
+    int32_t total[4];
     uint8_t totalValidMask;
+#endif
 };
 
 struct DriveHealth {

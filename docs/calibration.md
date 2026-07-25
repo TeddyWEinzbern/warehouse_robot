@@ -312,6 +312,7 @@ measured (a default was used) — go back and finish it before moving on.
 
 ```sh
 pio test -e native                     # geometry consistency checks
+pio test -e native_calibration         # calibration protocol/total checks
 pio run -t upload -e calibration       # unplug D0/D1 first, reconnect after
 ```
 

@@ -79,9 +79,10 @@ constexpr uint32_t HostControlWireTimeUs =
 constexpr uint32_t HostTransmitWindowEndUs =
     HostControlPeriodUs - HostControlWireTimeUs - 2000UL;
 constexpr uint32_t EncoderTotalPeriodUs = 500000UL;
-constexpr uint32_t MotorBoardQueryTimeoutMs = 15UL;
+constexpr uint32_t MotorBoardQueryTimeoutMs = 30UL;
 constexpr uint32_t MotorBoardInitializationTimeoutMs = 150UL;
 constexpr uint32_t MotorBoardInitializationRetryMs = 10000UL;
+constexpr uint8_t MotorBoardConsecutiveTimeoutLimit = 3;
 constexpr uint32_t FeedbackStaleMs = 100UL;
 constexpr uint32_t SensorStaleMs = 300UL;
 constexpr uint32_t AssistTimeoutMs = 5000UL;

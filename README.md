@@ -2,7 +2,8 @@
 
 Safety-oriented Arduino Uno firmware and a Python host console for a four-wheel
 mecanum warehouse robot. The project has two deployable firmware environments:
-`robot` and `calibration`. Native tests remain in the `native` environment.
+`robot` and `calibration`. Host-native tests use `native`, plus
+`native_calibration` for calibration-only protocol and encoder-total paths.
 
 The UART motor board owns the wheel-speed controller:
 
@@ -57,6 +58,7 @@ pio run -e robot
 
 # Host-native domain and protocol tests.
 pio test -e native
+pio test -e native_calibration
 ```
 
 The feature flags are intentionally separated by meaning:
@@ -232,6 +234,7 @@ hardware gates before setting `ROBOT_SENSOR_ENABLED=1`.
 PYTHONPATH=scripts python3 -m unittest discover -s tests -v
 python3 -m compileall -q scripts tests
 pio test -e native
+pio test -e native_calibration
 pio run -e robot -e calibration
 pio run -c "$PWD/.github/platformio-variants.ini" \
   -e ci_robot_qualified -e ci_robot_38400 -e ci_robot_open \

@@ -83,22 +83,26 @@ class CommunicationSubsystem {
     void poll(Stream &stream, uint32_t nowMs);
     const OperatorControlFrame &latest() const;
     ControlRequests takeRequests();
+#if ROBOT_CALIBRATION
     bool takeArmMove(PendingArmMove &command);
     bool takeJointReference(PendingJointReference &command);
     bool takeDriveCalibration(PendingDriveCalibration &command);
     bool takeCalibrationRead(PendingCalibrationRead &request);
+#endif
     bool sendFrame(
         MessageType type,
         uint8_t sequence,
         const uint8_t *payload,
         uint8_t payloadLength
     );
+#if ROBOT_CALIBRATION
     bool sendAck(uint8_t sequence, MessageType acknowledged);
     bool sendNack(
         uint8_t sequence,
         MessageType rejected,
         NackReason reason
     );
+#endif
     void pumpTransmit(Stream &stream, uint8_t byteBudget);
     bool transmitIdle() const;
     bool receiveIdle() const;
@@ -111,10 +115,12 @@ class CommunicationSubsystem {
 
     OperatorControlFrame latest_;
     ControlRequests requests_;
+#if ROBOT_CALIBRATION
     PendingArmMove armMove_;
     PendingJointReference jointReference_;
     PendingDriveCalibration driveCalibration_;
     PendingCalibrationRead calibrationRead_;
+#endif
     uint8_t previousButtons_;
     uint8_t encoded_[MaximumEncoded];
     uint8_t raw_[MaximumRaw];

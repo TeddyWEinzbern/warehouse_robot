@@ -24,7 +24,9 @@ class MockDriveBackend : public DriveBackend {
     void setWheelTargets(const WheelTargets &targets) { stored = targets; }
     void onMotorDeadline(uint32_t, bool, const RuntimeConfig &) {}
     void onEncoderDeadline(uint32_t, const RuntimeConfig &) {}
+#if ROBOT_CALIBRATION
     void onEncoderTotalDeadline(uint32_t) {}
+#endif
     void stop(uint32_t) { ++stops; stored = {0, 0, 0, 0}; }
     const DriveFeedback &feedback() const { return driveFeedback; }
     DriveHealth health(uint32_t) const { return {0, 0, true, true, true}; }

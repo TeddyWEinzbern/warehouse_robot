@@ -10,6 +10,7 @@ class MotorBoardFrameParser {
   public:
     MotorBoardFrameParser();
     MotorBoardFeedResult feed(char value);
+    void reset();
     const char *frame() const;
     uint16_t overflows() const;
     static bool parseFour(

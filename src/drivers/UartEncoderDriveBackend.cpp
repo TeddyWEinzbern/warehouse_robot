@@ -9,7 +9,9 @@ namespace {
 const char OpenLoopPrefix[] PROGMEM = "$Car_Pwm:";
 const char ClosedLoopPrefix[] PROGMEM = "$Car:";
 const char IncrementPrefix[] PROGMEM = "$MOTOR_4CH_Encoder_20ms:";
+#if ROBOT_CALIBRATION
 const char TotalPrefix[] PROGMEM = "$MOTOR_4CH_Encoder_Total:";
+#endif
 
 int32_t absolute32(int32_t value) { return value < 0 ? -value : value; }
 bool elapsed(uint32_t now, uint32_t since, uint32_t duration) { return now - since >= duration; }
@@ -25,19 +27,21 @@ UartEncoderDriveBackend::UartEncoderDriveBackend(HardwareSerial &serial)
     : serial_(serial), feedback_({}), targets_({0, 0, 0, 0}),
       initStage_(InitStage::Settling), outstanding_(QueryType::None),
       startedAtMs_(0), querySentAtMs_(0), lastZeroAtMs_(0),
-      lastEncoderCompletedAtMs_(0), lastEncoderDeadlineAtMs_(0),
+#if ROBOT_CALIBRATION
+      totalDue_(false),
+#endif
       badSignSinceMs_{0, 0, 0, 0}, stallSinceMs_{0, 0, 0, 0},
       mismatchSinceMs_{0, 0, 0, 0}, motionStartedAtMs_{0, 0, 0, 0},
       previousTargetMmS_{0, 0, 0, 0}, previousMeasuredMmS_{0, 0, 0, 0},
-      faults_(0), consecutiveMalformed_(0), implausibleSamples_(0),
-      unchangedTotalFrames_{0, 0, 0, 0},
+      faults_(0), consecutiveMalformed_(0), consecutiveTimeouts_(0),
+      implausibleSamples_(0),
       parser_(),
 #if ROBOT_CALIBRATION
       calibrationUntilMs_(0), calibrationValue_(0), calibrationChannel_(0),
       calibrationOpenLoop_(false), calibrationActive_(false),
 #endif
       armed_(false), pendingZero_(false),
-      pendingMotor_(false), encoderDue_(false), totalDue_(false) {}
+      pendingMotor_(false), encoderDue_(false) {}
 
 void UartEncoderDriveBackend::begin(const RuntimeConfig &runtime) {
     serial_.begin(config::MotorBoardBaud);
@@ -126,20 +130,22 @@ void UartEncoderDriveBackend::startInitializationAttempt(uint32_t nowMs) {
     initStage_ = InitStage::Settling;
     startedAtMs_ = nowMs;
     outstanding_ = QueryType::None;
+    parser_.reset();
     querySentAtMs_ = 0;
-    lastEncoderCompletedAtMs_ = 0;
-    lastEncoderDeadlineAtMs_ = 0;
     feedback_.incrementUpdatedAtMs = 0;
     feedback_.encoderValidMask = 0;
+#if ROBOT_CALIBRATION
     feedback_.totalValidMask = 0;
+#endif
     consecutiveMalformed_ = 0;
+    consecutiveTimeouts_ = 0;
     implausibleSamples_ = 0;
     armed_ = false;
     targets_ = {0, 0, 0, 0};
     pendingMotor_ = false;
     encoderDue_ = false;
-    totalDue_ = false;
 #if ROBOT_CALIBRATION
+    totalDue_ = false;
     calibrationActive_ = false;
 #endif
     pendingZero_ = true;
@@ -150,13 +156,15 @@ void UartEncoderDriveBackend::scheduleInitializationRetry(uint32_t nowMs) {
     startedAtMs_ = nowMs;
     outstanding_ = QueryType::None;
     feedback_.encoderValidMask = 0;
+#if ROBOT_CALIBRATION
     feedback_.totalValidMask = 0;
+#endif
     armed_ = false;
     targets_ = {0, 0, 0, 0};
     pendingMotor_ = false;
     encoderDue_ = false;
-    totalDue_ = false;
 #if ROBOT_CALIBRATION
+    totalDue_ = false;
     calibrationActive_ = false;
 #endif
     pendingZero_ = true;
@@ -231,16 +239,7 @@ void UartEncoderDriveBackend::serviceTransmit(uint32_t nowMs, const RuntimeConfi
 
 void UartEncoderDriveBackend::serviceQuery(uint32_t nowMs) {
     if (outstanding_ != QueryType::None) return;
-    if (encoderDue_) {
-        if (tryWriteLiteral(F("$MOTOR_4CH_READ:encoder_20ms!"), 29)) {
-            outstanding_ = QueryType::EncoderIncrement;
-            querySentAtMs_ = nowMs;
-            encoderDue_ = false;
-        }
-        return;
-    }
-    if (nowMs - lastEncoderCompletedAtMs_ > 5UL ||
-        nowMs - lastEncoderDeadlineAtMs_ > 5UL) return;
+#if ROBOT_CALIBRATION
     if (totalDue_) {
         if (tryWriteLiteral(F("$MOTOR_4CH_READ:encoder_total!"), 30)) {
             // A total remains valid only after this exact query succeeds.
@@ -251,12 +250,23 @@ void UartEncoderDriveBackend::serviceQuery(uint32_t nowMs) {
             querySentAtMs_ = nowMs;
             totalDue_ = false;
         }
+        return;
+    }
+#endif
+    if (encoderDue_) {
+        if (tryWriteLiteral(F("$MOTOR_4CH_READ:encoder_20ms!"), 29)) {
+            outstanding_ = QueryType::EncoderIncrement;
+            querySentAtMs_ = nowMs;
+            encoderDue_ = false;
+        }
+        return;
     }
 }
 
 void UartEncoderDriveBackend::pollReceive(uint32_t nowMs, const RuntimeConfig &runtime) {
     uint8_t processed = 0;
-    while (serial_.available() > 0 && processed++ < 48) {
+    // One pass can consume the longest supported 73-byte vendor reply.
+    while (serial_.available() > 0 && processed++ < 80) {
         const char value = static_cast<char>(serial_.read());
         if (parser_.feed(value) == MotorBoardFeedResult::Complete)
             finishMessage(parser_.frame(), nowMs, runtime);
@@ -269,17 +279,30 @@ void UartEncoderDriveBackend::pollReceive(uint32_t nowMs, const RuntimeConfig &r
         elapsed(nowMs, querySentAtMs_, responseTimeoutMs)) {
         const QueryType timedOut = outstanding_;
         outstanding_ = QueryType::None;
+        parser_.reset();
         if (timedOut == QueryType::EncoderIncrement &&
             initStage_ == InitStage::Qualifying) {
             scheduleInitializationRetry(nowMs);
         } else if (timedOut == QueryType::EncoderIncrement) {
-            markMalformed();
-        } else {
+            encoderDue_ = false;
+            consecutiveMalformed_ = 0;
+            if (consecutiveTimeouts_ <
+                    config::MotorBoardConsecutiveTimeoutLimit)
+                ++consecutiveTimeouts_;
+            if (consecutiveTimeouts_ >=
+                    config::MotorBoardConsecutiveTimeoutLimit) {
+                feedback_.encoderValidMask = 0;
+                faults_ |= FaultEncoderStale;
+            }
+        }
+#if ROBOT_CALIBRATION
+        else if (timedOut == QueryType::EncoderTotal) {
             feedback_.totalValidMask = 0;
         }
+#endif
     }
     if (initStage_ == InitStage::Ready && feedback_.incrementUpdatedAtMs != 0 &&
-        nowMs - feedback_.incrementUpdatedAtMs > config::FeedbackStaleMs)
+        nowMs - feedback_.incrementUpdatedAtMs >= config::FeedbackStaleMs)
         faults_ |= FaultEncoderStale;
 }
 
@@ -291,6 +314,7 @@ void UartEncoderDriveBackend::service(
 }
 
 void UartEncoderDriveBackend::markMalformed() {
+    consecutiveTimeouts_ = 0;
     if (consecutiveMalformed_ != 255) ++consecutiveMalformed_;
     feedback_.encoderValidMask = 0;
     if (consecutiveMalformed_ >= 3) faults_ |= FaultEncoderMalformed;
@@ -316,24 +340,29 @@ void UartEncoderDriveBackend::finishMessage(
         else
             markMalformed();
         outstanding_ = QueryType::None;
-    } else if (outstanding_ == QueryType::EncoderTotal &&
-               strncmp_P(
-                   message, TotalPrefix, sizeof(TotalPrefix) - 1
-               ) == 0) {
+#if ROBOT_CALIBRATION
+    } else if (
+        outstanding_ == QueryType::EncoderTotal &&
+        strncmp_P(
+            message, TotalPrefix, sizeof(TotalPrefix) - 1
+        ) == 0
+    ) {
         if (MotorBoardFrameParser::parseFour(
                 message + sizeof(TotalPrefix) - 1,
                 values, INT32_MIN, INT32_MAX
             ))
-            acceptTotals(values, nowMs, runtime);
+            acceptTotals(values);
         else
             feedback_.totalValidMask = 0;
         outstanding_ = QueryType::None;
+#endif
     }
 }
 
 void UartEncoderDriveBackend::acceptEncoder(
     const int32_t *values, uint32_t nowMs, const RuntimeConfig &runtime
 ) {
+    consecutiveTimeouts_ = 0;
     uint16_t intervalMs = 20;
     if (runtime.encoder.semantics == EncoderSampleSemantics::ElapsedBetweenSamples &&
         feedback_.incrementUpdatedAtMs != 0) {
@@ -372,7 +401,6 @@ void UartEncoderDriveBackend::acceptEncoder(
     feedback_.incrementUpdatedAtMs = nowMs;
     feedback_.encoderValidMask = 0x0F;
     consecutiveMalformed_ = 0;
-    lastEncoderCompletedAtMs_ = nowMs;
     for (uint8_t index = 0; index < 4; ++index) updateWheelHealth(index, nowMs);
 }
 
@@ -419,35 +447,13 @@ void UartEncoderDriveBackend::updateWheelHealth(uint8_t wheel, uint32_t nowMs) {
 #endif
 }
 
-void UartEncoderDriveBackend::acceptTotals(
-    const int32_t *values, uint32_t nowMs, const RuntimeConfig &runtime
-) {
-#if !ROBOT_CALIBRATION
-    const int16_t logicalTargets[4] = {
-        targets_.frontLeft, targets_.frontRight, targets_.rearLeft, targets_.rearRight
-    };
-    const bool hadTotals = feedback_.totalValidMask == 0x0F;
-    for (uint8_t logical = 0; logical < 4; ++logical) {
-        const uint8_t channel = static_cast<uint8_t>(runtime.encoder.channelMap[logical]);
-        const bool settled = motionStartedAtMs_[logical] != 0 &&
-            nowMs - motionStartedAtMs_[logical] >= 250UL;
-        if (hadTotals && settled && absolute32(logicalTargets[logical]) >= 100L &&
-            values[channel] == feedback_.total[channel]) {
-            if (unchangedTotalFrames_[logical] != 255)
-                ++unchangedTotalFrames_[logical];
-            if (unchangedTotalFrames_[logical] >= 1)
-                faults_ |= FaultDriveStall;
-        } else {
-            unchangedTotalFrames_[logical] = 0;
-        }
-    }
-#else
-    (void)runtime;
-#endif
+#if ROBOT_CALIBRATION
+void UartEncoderDriveBackend::acceptTotals(const int32_t *values) {
     for (uint8_t index = 0; index < 4; ++index)
         feedback_.total[index] = values[index];
     feedback_.totalValidMask = 0x0F;
 }
+#endif
 
 void UartEncoderDriveBackend::setWheelTargets(const WheelTargets &targets) { targets_ = targets; }
 void UartEncoderDriveBackend::onMotorDeadline(uint32_t nowMs, bool armed, const RuntimeConfig &runtime) {
@@ -456,10 +462,10 @@ void UartEncoderDriveBackend::onMotorDeadline(uint32_t nowMs, bool armed, const 
     else pendingZero_ = true;
     serviceTransmit(nowMs, runtime);
 }
-void UartEncoderDriveBackend::onEncoderDeadline(uint32_t nowMs, const RuntimeConfig &) {
-    lastEncoderDeadlineAtMs_ = nowMs;
+void UartEncoderDriveBackend::onEncoderDeadline(uint32_t, const RuntimeConfig &) {
     if (initStage_ == InitStage::Qualifying || initStage_ == InitStage::Ready) encoderDue_ = true;
 }
+#if ROBOT_CALIBRATION
 void UartEncoderDriveBackend::onEncoderTotalDeadline(uint32_t nowMs) {
     feedback_.totalValidMask = 0;
     if (initStage_ != InitStage::Ready) {
@@ -469,7 +475,7 @@ void UartEncoderDriveBackend::onEncoderTotalDeadline(uint32_t nowMs) {
     totalDue_ = true;
     serviceQuery(nowMs);
 }
-#if ROBOT_CALIBRATION
+
 bool UartEncoderDriveBackend::startCalibrationSpin(
     uint8_t mode, uint8_t channel, int16_t value,
     uint16_t durationMs, uint32_t nowMs
@@ -525,7 +531,7 @@ void UartEncoderDriveBackend::stop(uint32_t nowMs) {
 const DriveFeedback &UartEncoderDriveBackend::feedback() const { return feedback_; }
 DriveHealth UartEncoderDriveBackend::health(uint32_t nowMs) const {
     const bool fresh = feedback_.incrementUpdatedAtMs != 0 &&
-        nowMs - feedback_.incrementUpdatedAtMs <= config::FeedbackStaleMs;
+        nowMs - feedback_.incrementUpdatedAtMs < config::FeedbackStaleMs;
     const bool ready =
         initStage_ == InitStage::Ready &&
         feedback_.encoderValidMask == 0x0F;
@@ -536,6 +542,7 @@ DriveHealth UartEncoderDriveBackend::health(uint32_t nowMs) const {
 void UartEncoderDriveBackend::clearFaults() {
     faults_ = 0;
     consecutiveMalformed_ = 0;
+    consecutiveTimeouts_ = 0;
 }
 uint8_t UartEncoderDriveBackend::outstandingQuery() const {
     return static_cast<uint8_t>(outstanding_);

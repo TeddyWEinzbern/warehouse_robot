@@ -32,6 +32,11 @@ MotorBoardFeedResult MotorBoardFrameParser::feed(char value) {
     return MotorBoardFeedResult::Overflow;
 }
 
+void MotorBoardFrameParser::reset() {
+    length_ = 0;
+    collecting_ = false;
+}
+
 const char *MotorBoardFrameParser::frame() const { return buffer_; }
 uint16_t MotorBoardFrameParser::overflows() const { return overflows_; }
 

@@ -30,6 +30,7 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install platformio==6.1.18
       - run: pio test -e native
+      - run: pio test -e native_calibration
       - run: >-
           pio run
           -e robot

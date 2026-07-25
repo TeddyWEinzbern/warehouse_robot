@@ -102,9 +102,11 @@ void RobotApplication::begin() {
     encoderTask_.start(nowUs, config::EncoderQueryPeriodUs, 5000UL);
     servoTask_.start(nowUs, config::ServoPeriodUs, 10000UL);
     sonarTask_.start(nowUs, config::SonarGroupPeriodUs, 15000UL);
+#if ROBOT_CALIBRATION
     encoderTotalTask_.start(
         nowUs, config::EncoderTotalPeriodUs, 250000UL
     );
+#endif
     statusTask_.start(
         nowUs, config::CriticalStatusPeriodUs,
         config::CriticalStatusPeriodUs
@@ -117,12 +119,12 @@ void RobotApplication::begin() {
 #endif
 }
 
+#if ROBOT_CALIBRATION
 void RobotApplication::processHostMessages(uint32_t nowMs) {
     if (!communication_.transmitIdle()) return;
 
     PendingArmMove armMove = {};
     if (communication_.takeArmMove(armMove)) {
-#if ROBOT_CALIBRATION
         if (!config::ArmEnabled ||
             safety_.state() != RobotState::Disarmed ||
             armMove.joint >= 4 || armMove.degrees > 180) {
@@ -142,18 +144,11 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
                 armMove.sequence, MessageType::CalibrationArmMove
             );
         }
-#else
-        communication_.sendNack(
-            armMove.sequence, MessageType::CalibrationArmMove,
-            NackReason::InvalidState
-        );
-#endif
         return;
     }
 
     PendingJointReference reference = {};
     if (communication_.takeJointReference(reference)) {
-#if ROBOT_CALIBRATION
         if (!config::ArmEnabled ||
             safety_.state() != RobotState::Disarmed) {
             communication_.sendNack(
@@ -177,19 +172,12 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
                 MessageType::CalibrationSetJointReference
             );
         }
-#else
-        communication_.sendNack(
-            reference.sequence,
-            MessageType::CalibrationSetJointReference,
-            NackReason::InvalidState
-        );
-#endif
         return;
     }
 
     PendingDriveCalibration spin = {};
     if (communication_.takeDriveCalibration(spin)) {
-#if ROBOT_CALIBRATION && ROBOT_DRIVER_ENABLED
+#if ROBOT_DRIVER_ENABLED
         const int32_t magnitude = spin.value < 0
             ? -static_cast<int32_t>(spin.value)
             : static_cast<int32_t>(spin.value);
@@ -234,7 +222,6 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
 
     PendingCalibrationRead request = {};
     if (communication_.takeCalibrationRead(request)) {
-#if ROBOT_CALIBRATION
         if (safety_.state() != RobotState::Disarmed ||
             !sendCalibrationReport(request, nowMs)) {
             communication_.sendNack(
@@ -242,13 +229,9 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
                 NackReason::InvalidState
             );
         }
-#else
-        communication_.sendNack(
-            request.sequence, request.type, NackReason::InvalidState
-        );
-#endif
     }
 }
+#endif
 
 void RobotApplication::enforceSafetyStop(uint32_t nowMs) {
     if (!safety_.takeImmediateStop()) return;
@@ -380,9 +363,11 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
     if (sonarTask_.due(nowUs) && sonarEnabled())
         sensors_.startNextGroup(nowMs, nowUs);
 
+#if ROBOT_CALIBRATION
     if (encoderTotalTask_.due(nowUs) && config::DriveEnabled &&
         communication_.transmitIdle())
         driveBackend_.onEncoderTotalDeadline(nowMs);
+#endif
 
 #if !ROBOT_CALIBRATION
     if (statusTask_.due(nowUs)) statusPending_ = true;
@@ -509,10 +494,10 @@ bool RobotApplication::sendCriticalStatus(uint32_t nowMs) {
     return true;
 }
 
+#if ROBOT_CALIBRATION
 bool RobotApplication::sendCalibrationReport(
     const PendingCalibrationRead &request, uint32_t nowMs
 ) {
-#if ROBOT_CALIBRATION
     if (request.type == MessageType::CalibrationReadArm) {
         if (!config::ArmEnabled) return false;
         uint8_t payload[5] = {
@@ -546,7 +531,7 @@ bool RobotApplication::sendCalibrationReport(
                 );
             const bool incrementFresh =
                 feedback.incrementUpdatedAtMs != 0 &&
-                nowMs - feedback.incrementUpdatedAtMs <=
+                nowMs - feedback.incrementUpdatedAtMs <
                     config::FeedbackStaleMs;
             payload[offset++] = incrementFresh
                 ? static_cast<uint8_t>(
@@ -567,7 +552,8 @@ bool RobotApplication::sendCalibrationReport(
         for (uint8_t wheel = 0; wheel < 4; ++wheel)
             putI16(payload, offset, feedback.measuredMmS[wheel]);
         payload[offset++] =
-            nowMs - feedback.incrementUpdatedAtMs <=
+            feedback.incrementUpdatedAtMs != 0 &&
+                nowMs - feedback.incrementUpdatedAtMs <
                     config::FeedbackStaleMs
                 ? feedback.encoderValidMask : 0;
         return communication_.sendFrame(
@@ -620,12 +606,9 @@ bool RobotApplication::sendCalibrationReport(
             payload, offset
         );
     }
-#else
-    (void)request;
-    (void)nowMs;
-#endif
     return false;
 }
+#endif
 
 void RobotApplication::serviceHostTransmit(
     uint32_t nowMs, uint32_t nowUs
@@ -684,7 +667,9 @@ void RobotApplication::update() {
         if (config::ArmEnabled) arm_.clearFault();
     }
     enforceSafetyStop(nowMs);
+#if ROBOT_CALIBRATION
     processHostMessages(nowMs);
+#endif
 
     if (previousState_ != safety_.state()) {
         if (safety_.state() == RobotState::Armed &&
