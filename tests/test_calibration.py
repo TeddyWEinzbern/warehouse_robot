@@ -319,7 +319,7 @@ class OnDemandReportTests(unittest.TestCase):
         link.queue_reply(
             system_report(
                 1, 300, state=4, drive_flags=0x03,
-                drive_faults=0x0004, drive_warnings=0x000C,
+                drive_faults=0x0004, drive_warnings=0x003C,
                 init_stage=6, rx_bytes=255,
                 complete_frames=9, increment_frames=7, ack_mask=0x01,
             )
@@ -330,7 +330,8 @@ class OnDemandReportTests(unittest.TestCase):
         self.assertIn("firmware state: FAULT", report)
         self.assertIn("faults=0x0004", report)
         self.assertIn(
-            "warnings=driver_timeout_unsafe,encoder_timeout_ignored",
+            "warnings=driver_timeout_unsafe,encoder_timeout_ignored,"
+            "encoder_sign_ignored,drive_mismatch_ignored",
             report,
         )
         self.assertIn("RX bytes=255+", report)

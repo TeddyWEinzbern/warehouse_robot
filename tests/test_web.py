@@ -81,6 +81,11 @@ class RuntimeErrorReportingTests(unittest.TestCase):
             hub._report_runtime_errors(snapshot)
             hub._report_runtime_errors(snapshot)
         self.assertEqual(output.getvalue().count("serial write failed"), 1)
+        self.assertRegex(
+            output.getvalue(),
+            r"\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] "
+            r"Runtime error: serial write failed",
+        )
 
     def test_last_and_fatal_errors_without_events_are_visible(self):
         hub = SnapshotHub(StaticRuntime())
@@ -164,10 +169,13 @@ class MinimalSafetySurfaceTests(unittest.IsolatedAsyncioTestCase):
         )
         html = (static_root / "index.html").read_text()
         javascript = (static_root / "app.js").read_text()
+        stylesheet = (static_root / "style.css").read_text()
         self.assertEqual(html.count("<button"), 2)
         self.assertNotIn("Runtime parameters", html)
         self.assertNotIn("/api/parameter", javascript)
         self.assertNotIn("refresh_parameters", javascript)
+        self.assertIn(".button.arm:hover:not(:disabled)", stylesheet)
+        self.assertIn(".button.estop:hover:not(:disabled)", stylesheet)
 
     async def test_only_safety_actions_are_exposed(self):
         class ActionRuntime:

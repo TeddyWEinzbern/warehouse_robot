@@ -11,9 +11,18 @@ The UART motor board owns the wheel-speed controller:
 - `$Car:` carries four closed-loop wheel-speed targets in m/s.
 - `$Car_Pwm:` carries four open-loop PWM-percent targets when the open-loop
   build flag is selected.
+- Startup selects vendor motor type `1`, matching the installed TT motors.
 - The Uno owns mecanum mixing, chassis ramps, safety interlocks, scheduling,
   arm control, optional sonar, and supervision. It does not add another
   wheel-speed PID loop.
+- The Uno updates the chassis ramp and attempts a motor target every 10 ms;
+  encoder-increment queries remain every 20 ms. The host control stream remains
+  30 Hz and the vendor board's own wheel-speed PID remains 50 Hz, so the 10 ms
+  target period is not an end-to-end 10 ms response guarantee.
+
+Compiled chassis ramp defaults are longitudinal 1,500 mm/s² acceleration and
+3,000 mm/s² deceleration, lateral 1,000/2,000 mm/s², yaw
+4,000/8,000 mrad/s², with a 40 ms hold at a commanded direction reversal.
 
 Wheel order, signs, geometry, counts/revolution, arm limits, and qualification
 are established with [the calibration checklist](docs/calibration.md). A
@@ -81,7 +90,7 @@ The feature flags are intentionally separated by meaning:
 | `ROBOT_ARM_CALIBRATED` | Records completed arm calibration. It does not enable the arm. |
 | `ROBOT_SENSOR_ENABLED` | Functional sonar gate; omitted means `0`. Disabled sensors remain allocated but their pins and scheduler are not activated. The shipped `calibration` environment selects `1` so sensors can be qualified. |
 | `ROBOT_CALIBRATION` | Selects the calibration firmware personality. Set by the `calibration` environment. |
-| `ROBOT_DRIVER_TIMEOUT_UNSAFE` | Explicitly degrades only post-Ready encoder timeout/stale handling from fault to warning. Initialization still requires the vendor reply, normal arming still requires one parseable feedback sample, and other faults are not bypassed. |
+| `ROBOT_DRIVER_TIMEOUT_UNSAFE` | Explicitly degrades post-Ready encoder timeout/stale, encoder-sign, and drive-mismatch handling from fault to warning. Initialization still requires the vendor reply, normal arming still requires one parseable feedback sample, and malformed, implausible, stall, and unrelated faults are not bypassed. |
 | `ROBOT_HOST_BAUD` | HC-06 UART baud: `9600UL` by default or `38400UL`. |
 
 Preprocessor decisions are kept at structural boundaries: defaults and
@@ -100,9 +109,10 @@ is running.
 `robot_unsafe` and `calibration_unsafe` can continue commanding the last
 requested motion after encoder feedback is lost. They always publish
 `driver_timeout_unsafe`, add `encoder_timeout_ignored` while feedback is
-missing,
-and must only be used with every wheel raised and an immediate physical power
-cutoff available. Never deploy either image for ground operation.
+missing, and latch `encoder_sign_ignored` or `drive_mismatch_ignored` for the
+current armed session instead of faulting on those two motion checks. They must
+only be used with every wheel raised and an immediate physical power cutoff
+available. Never deploy either image for ground operation.
 
 To select open-loop board control, replace
 `-DROBOT_DRIVER_CONTROL_CLOSE=1` with
@@ -182,12 +192,21 @@ The loopback-only WebUI is a safety console, not a tuning dashboard. It shows:
 - firmware profile, driver mode, and enabled/calibrated subsystem summary;
 - controller state, pending safety action, and target/actual 30 Hz timing
   including interval and missed-control counts;
-- local/fatal errors and recent host safety events.
+- timestamped local/fatal errors, firmware FAULT flag transitions, and recent
+  host safety events.
 
 It has exactly two contextual safety controls:
 
 1. `ARM`, `DISARM`, or `CLEAR FAULT`, according to the current state;
 2. `E-STOP` or `CLEAR E-STOP`, according to the current state.
+
+On SDL-recognized Xbox-style controllers, including the Xbox One Elite Series
+2, the named `Menu`/Start control requests ARM and `View`/Back requests CLEAR
+E-STOP; raw platform-specific button numbers are not used. Menu is
+edge-triggered and does not toggle or DISARM. The ARM request still requires
+fresh fault-free DISARMED status, completed calibration, a cleared E-stop, and
+0.6 seconds of neutral control. DISARM and E-STOP remain available from the
+loopback WebUI, and controller loss still latches E-stop.
 
 There are no wheel, encoder, sonar, arm, scheduler, or tuning panels and no
 remote parameter API. Closing the browser does not stop the Python safety
@@ -250,6 +269,7 @@ PYTHONPATH=scripts python3 -m unittest discover -s tests -v
 python3 -m compileall -q scripts tests
 pio test -e native
 pio test -e native_calibration
+pio test -e native_unsafe
 pio run -e robot -e calibration
 pio run -c "$PWD/.github/platformio-variants.ini" \
   -e ci_robot_qualified -e ci_robot_38400 -e ci_robot_open \

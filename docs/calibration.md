@@ -113,7 +113,7 @@ Notes:
 - If the motor board is absent or slow at startup, the firmware stays in Boot
   and continuously commands zero motor output. It waits up to 150 ms for the
   vendor-prefixed encoder reply, then retries the complete board
-  initialization every 10 seconds. Reconnect the board and wait for the next
+  initialization every 2 seconds. Reconnect the board and wait for the next
   retry; resetting the Uno or clearing a fault is not required.
 
 ## Chapter 2 — Calibrate the arm
@@ -399,7 +399,7 @@ send ClearFault before ARMing again.
 | `blocked: shoulder/elbow coupling guard...` | Protection, not a fault. Back off, or move the other joint first (chapter 2.3) |
 | Guard behaves backwards (blocks obviously-safe poses / allows deep folds) | j1/j2 not yet synced, or a wrong `dir`. Mark center + set dir for both, watch for `synced j1`/`synced j2`, re-test the direction if it persists |
 | `invalid state` or `disabled` on `j`/`m`/`v` commands | Wrong firmware (must be `calibration`), not DISARMED, or the matching `ROBOT_ARM_ENABLED` / `ROBOT_DRIVE_ENABLED` flag is `0`; for motor commands also check board power and D0/D1 |
-| Calibration remains in Boot with the motor board disconnected | Fail-closed initialization is active. Motor output remains zero; reconnect D0/D1 and board power, then allow up to 10 seconds for the automatic retry |
+| Calibration remains in Boot with the motor board disconnected | Fail-closed initialization is active. Motor output remains zero; reconnect D0/D1 and board power, then allow up to 2 seconds for the automatic retry |
 | `s`/`system` shows `BOOT`, `stage=retry_wait`, and `RX bytes=0` | Uno D0 has received no driver-board traffic. Check board power, common ground, TX → D0, and USB serial contention; relaxing the parser cannot fix this |
 | Both SET ACKs are listed but `encoder frames=0` | Commands reach the board and ACKs return, but the encoder-query response is not reaching the parser. Keep motor output disabled and inspect the D0 waveform/query timing |
 | `stage=ready` but firmware state is `FAULT` | Initialization succeeded and a later drive fault latched. Read the hexadecimal fault field, restore fresh feedback, then clear the fault; do not bypass it |

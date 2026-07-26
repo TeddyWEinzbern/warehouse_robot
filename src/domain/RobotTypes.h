@@ -56,6 +56,8 @@ enum WarningCode : uint16_t {
     WarningArmTargetLimited = 1U << 1,
     WarningDriverTimeoutUnsafe = 1U << 2,
     WarningEncoderTimeoutIgnored = 1U << 3,
+    WarningEncoderSignIgnored = 1U << 4,
+    WarningDriveMismatchIgnored = 1U << 5,
 };
 
 struct OperatorControlFrame {

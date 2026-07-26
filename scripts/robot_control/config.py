@@ -29,7 +29,7 @@ class RobotControlConfig:
     cancel_assist_button: int = 2  # X
     start_assist_button: int = 3  # Y
     clear_estop_button: int = 6  # View
-    estop_button: int = 7  # Menu
+    arm_button: int = 7  # Menu
 
 
 CONTROL = RobotControlConfig()

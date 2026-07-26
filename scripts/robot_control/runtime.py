@@ -50,6 +50,8 @@ WARNING_NAMES = (
     "arm_target_limited",
     "driver_timeout_unsafe",
     "encoder_timeout_ignored",
+    "encoder_sign_ignored",
+    "drive_mismatch_ignored",
 )
 
 CONTROL_RATE_HZ = 30.0
@@ -170,7 +172,7 @@ class RobotRuntime:
         }
         self._control_send_times: list[float] = []
         self._last_control_sent_at: float | None = None
-        self._previous_estop_button = False
+        self._previous_arm_button = False
         self._previous_clear_estop_button = False
         self._controller_retry_at = 0.0
         self._publish_snapshot()
@@ -650,6 +652,16 @@ class RobotRuntime:
             ):
                 self._record_event("error", "Rejected malformed critical status")
                 return
+            previous_faults = int(self._critical_status.get("faults", 0))
+            faults = int(decoded.get("faults", 0))
+            new_faults = faults & ~previous_faults
+            if new_faults:
+                names = ", ".join(self._bit_names(new_faults, FAULT_NAMES))
+                self._record_event(
+                    "error",
+                    "Firmware FAULT flags appeared: "
+                    f"{names} (new=0x{new_faults:04X}, active=0x{faults:04X})",
+                )
             self._critical_status = {
                 key: value for key, value in decoded.items() if key != "kind"
             }
@@ -697,19 +709,22 @@ class RobotRuntime:
             self._joystick, self._control_config, self._fast_sequence
         )
         self._controller_state = self._joystick.get_name()
-        estop_pressed = bool(
-            self._joystick.get_button(self._control_config.estop_button)
+        arm_pressed = bool(
+            self._joystick.get_button(self._control_config.arm_button)
         )
         clear_pressed = bool(
             self._joystick.get_button(self._control_config.clear_estop_button)
         )
-        if estop_pressed and not self._previous_estop_button:
-            self._host_estop_latched = True
-            self._critical_estop.set()
-            self._wake.set()
+        if arm_pressed and not self._previous_arm_button:
+            if self.submit("arm"):
+                self._record_event("info", "Controller Menu requested ARM")
+            else:
+                self._record_event(
+                    "error", "Controller ARM request could not be queued"
+                )
         if clear_pressed and not self._previous_clear_estop_button:
             self._request_clear_estop()
-        self._previous_estop_button = estop_pressed
+        self._previous_arm_button = arm_pressed
         self._previous_clear_estop_button = clear_pressed
         return frame
 

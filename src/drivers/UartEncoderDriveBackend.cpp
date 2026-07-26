@@ -37,7 +37,11 @@ UartEncoderDriveBackend::UartEncoderDriveBackend(HardwareSerial &serial)
       badSignSinceMs_{0, 0, 0, 0}, stallSinceMs_{0, 0, 0, 0},
       mismatchSinceMs_{0, 0, 0, 0}, motionStartedAtMs_{0, 0, 0, 0},
       previousTargetMmS_{0, 0, 0, 0}, previousMeasuredMmS_{0, 0, 0, 0},
-      faults_(0), consecutiveMalformed_(0), consecutiveTimeouts_(0),
+      faults_(0),
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+      unsafeMotionWarnings_(0),
+#endif
+      consecutiveMalformed_(0), consecutiveTimeouts_(0),
       implausibleSamples_(0),
       parser_(),
 #if ROBOT_CALIBRATION
@@ -188,7 +192,8 @@ void UartEncoderDriveBackend::serviceInitialization(uint32_t nowMs) {
     const uint32_t age = nowMs - startedAtMs_;
     if (initStage_ == InitStage::Settling && age >= 100UL) initStage_ = InitStage::MotorType;
     if (initStage_ == InitStage::MotorType) {
-        if (tryWriteLiteral(F("$MOTOR_4CH_SET:0!"), 17)) initStage_ = InitStage::EncoderPolarity;
+        // Vendor motor type 1 selects the installed TT motors.
+        if (tryWriteLiteral(F("$MOTOR_4CH_SET:1!"), 17)) initStage_ = InitStage::EncoderPolarity;
         return;
     }
     if (initStage_ == InitStage::EncoderPolarity && age >= 200UL) {
@@ -444,8 +449,14 @@ void UartEncoderDriveBackend::updateWheelHealth(uint8_t wheel, uint32_t nowMs) {
     const bool signBad = absolute32(measured) >= 50L && ((target < 0) != (measured < 0));
     if (signBad) {
         if (badSignSinceMs_[wheel] == 0) badSignSinceMs_[wheel] = nowMs;
-        else if (nowMs - badSignSinceMs_[wheel] >= 250UL)
+        else if (nowMs - badSignSinceMs_[wheel] >= 250UL) {
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+            unsafeMotionWarnings_ |=
+                static_cast<uint8_t>(WarningEncoderSignIgnored);
+#else
             faults_ |= FaultEncoderSign;
+#endif
+        }
     } else badSignSinceMs_[wheel] = 0;
     const bool settled = motionStartedAtMs_[wheel] != 0 &&
         nowMs - motionStartedAtMs_[wheel] >= 250UL;
@@ -457,8 +468,14 @@ void UartEncoderDriveBackend::updateWheelHealth(uint8_t wheel, uint32_t nowMs) {
     const int32_t allowedError = absolute32(target) / 2L > 100L ? absolute32(target) / 2L : 100L;
     if (absolute32(static_cast<int32_t>(target) - measured) > allowedError) {
         if (mismatchSinceMs_[wheel] == 0) mismatchSinceMs_[wheel] = nowMs;
-        else if (nowMs - mismatchSinceMs_[wheel] >= 750UL)
+        else if (nowMs - mismatchSinceMs_[wheel] >= 750UL) {
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+            unsafeMotionWarnings_ |=
+                static_cast<uint8_t>(WarningDriveMismatchIgnored);
+#else
             faults_ |= FaultDriveMismatch;
+#endif
+        }
     } else mismatchSinceMs_[wheel] = 0;
 #endif
 }
@@ -492,6 +509,9 @@ void UartEncoderDriveBackend::noteDiagnosticFrame(const char *message) {
 
 void UartEncoderDriveBackend::setWheelTargets(const WheelTargets &targets) { targets_ = targets; }
 void UartEncoderDriveBackend::onMotorDeadline(uint32_t nowMs, bool armed, const RuntimeConfig &runtime) {
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+    if (armed_ && !armed) unsafeMotionWarnings_ = 0;
+#endif
     armed_ = armed;
     if (armed && initStage_ == InitStage::Ready) pendingMotor_ = true;
     else pendingZero_ = true;
@@ -587,6 +607,7 @@ DriveHealth UartEncoderDriveBackend::health(uint32_t nowMs) const {
     warnings |= WarningDriverTimeoutUnsafe;
     if (consecutiveTimeouts_ != 0 || (ready && !fresh))
         warnings |= WarningEncoderTimeoutIgnored;
+    warnings |= unsafeMotionWarnings_;
 #endif
     return {
         faults_, warnings, initStage_ == InitStage::Ready, ready,
@@ -595,6 +616,9 @@ DriveHealth UartEncoderDriveBackend::health(uint32_t nowMs) const {
 }
 void UartEncoderDriveBackend::clearFaults() {
     faults_ = 0;
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+    unsafeMotionWarnings_ = 0;
+#endif
     consecutiveMalformed_ = 0;
     consecutiveTimeouts_ = 0;
 }

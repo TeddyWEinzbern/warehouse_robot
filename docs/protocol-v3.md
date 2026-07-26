@@ -173,7 +173,8 @@ Critical `state` values are `0` Boot, `1` Disarmed, `2` Armed, `3` E-stop, and
 | 8 | arm target |
 
 Warning bits are bit 0 drive unqualified, bit 1 arm target limited, bit 2
-driver-timeout unsafe build active, and bit 3 encoder timeout ignored.
+driver-timeout unsafe build active, bit 3 encoder timeout ignored, bit 4
+encoder sign ignored, and bit 5 drive mismatch ignored.
 NACK reasons are `1` malformed, `2` unsupported, `3` invalid state, and `4`
 validation failure.
 
@@ -360,6 +361,12 @@ coalesced rather than blocking the control path. A 14-byte status can span
 more than one permitted window at 9600; control and E-stop receive still take
 priority. Unbounded logging must never share the HC-06 UART.
 
+The Uno's chassis-ramp task and motor-target task both run every 10 ms.
+Encoder-increment requests remain every 20 ms and start 5 ms out of phase with
+the motor-target task. These are Uno scheduling periods, separate from the
+30 Hz host control stream and the vendor board's 50 Hz wheel-speed PID; they do
+not establish a 10 ms end-to-end command response.
+
 These timing rules are a software design constraint, not hardware
 qualification. Verify both baud modes with a logic analyzer while exercising
 30 Hz control, 2 Hz status, immediate state changes, motor queries, and servo
@@ -377,32 +384,32 @@ measurement of live stack headroom.
 | Image | Flash | Static SRAM | Static free |
 | --- | ---: | ---: | ---: |
 | v2 closed-loop robot (`ba4b8ad`) | 31,668 B (98.2%) | 1,812 B (88.5%) | 236 B |
-| v3 `robot` | 28,134 B (87.2%) | 1,311 B (64.0%) | 737 B |
-| v3 `robot_unsafe` | 28,068 B (87.0%) | 1,311 B (64.0%) | 737 B |
-| v3 qualified robot + sonar | 30,246 B (93.8%) | 1,331 B (65.0%) | 717 B |
+| v3 `robot` | 28,138 B (87.2%) | 1,311 B (64.0%) | 737 B |
+| v3 `robot_unsafe` | 28,110 B (87.1%) | 1,312 B (64.1%) | 736 B |
+| v3 qualified robot + sonar | 30,250 B (93.8%) | 1,331 B (65.0%) | 717 B |
 | v2 calibration (`ba4b8ad`) | 31,844 B (98.7%) | 1,835 B (89.6%) | 213 B |
-| v3 `calibration` | 23,518 B (72.9%) | 1,463 B (71.4%) | 585 B |
-| v3 `calibration_unsafe` | 23,436 B (72.7%) | 1,463 B (71.4%) | 585 B |
+| v3 `calibration` | 23,522 B (72.9%) | 1,463 B (71.4%) | 585 B |
+| v3 `calibration_unsafe` | 23,480 B (72.8%) | 1,464 B (71.5%) | 584 B |
 
 The fair production comparison is v2 closed-loop against v3 qualified
-closed-loop: flash falls by 3,534 bytes (11.2%), static SRAM by 501 bytes
+closed-loop: flash falls by 3,530 bytes (11.1%), static SRAM by 501 bytes
 (27.6%), and static free SRAM rises from 236 to 737 bytes. For calibration,
-flash falls by 8,326 bytes (26.1%) and static SRAM by 372 bytes (20.3%).
+flash falls by 8,322 bytes (26.1%) and static SRAM by 372 bytes (20.3%).
 
 The production-only pruning removes calibration command state/ACK handling
 and the unused periodic encoder-total path. At that measured step it reduced
 the worst-case sonar image from 31,746-byte/1,394-byte to
 30,076-byte/1,330-byte: 1,670 bytes of Flash and 64 bytes of SRAM recovered.
-The subsequent timeout hardening adds 170 bytes of Flash and one byte of
-static SRAM to that image. Calibration retains encoder-total queries and
-reports, plus the read-only driver initialization counters used to distinguish
-an electrically silent D0 input from rejected or missing motor-board replies.
+Subsequent drive-health and warning hardening brings the current image to
+30,250-byte/1,331-byte. Calibration retains encoder-total queries and reports,
+plus the read-only driver initialization counters used to distinguish an
+electrically silent D0 input from rejected or missing motor-board replies.
 
 The linked v3 matrix contains no application-visible `malloc`, `calloc`,
 `realloc`, `free`, or C++ allocator symbols. The 256-byte live watermark gate
 still applies because static free SRAM does not include worst-case call
 frames, interrupt nesting, or library stack use. The sonar-enabled production
-variant has 2,010 bytes of flash remaining; keep that build in CI and treat
+variant has 2,006 bytes of flash remaining; keep that build in CI and treat
 any material growth as a resource review trigger.
 
 ## Motor-board UART contract
@@ -412,18 +419,20 @@ The motor board is independent of the HC-06 host protocol:
 - `$Car:` carries four A/B/C/D closed-loop speed targets in m/s.
 - `$Car_Pwm:` carries four signed open-loop percentage targets.
 - `$MOTOR_4CH_READ:encoder_20ms!` requests encoder increments.
-- calibration-only encoder-total requests are serialized through the same
-  parser; production health and stall checks use the 20 ms increments.
+- `$MOTOR_4CH_READ:encoder_total!` requests calibration-only cumulative encoder
+  counts. It is serialized through the same parser; production health and stall
+  checks use the 20 ms increments.
 - DISARM, link loss, E-stop, disabled drive, and drive faults converge on
   `$Car:0,0,0,0!`.
-- Startup sends the vendor motor-type and encoder-polarity commands, then
-  makes one encoder-increment request. As in the vendor example, the first
-  complete reply beginning `$MOTOR_4CH_Encoder_20ms:` proves that the board
-  is present; parsing its four numeric fields separately determines whether
-  feedback is ready.
+- Startup sends `$MOTOR_4CH_SET:1!` to select the installed TT motors, then
+  `$MOTOR_4CH_SET_ENCPDER_POLARITY:0!`, preserving the vendor command's
+  `ENCPDER` spelling, before making one encoder-increment request. As in the
+  vendor example, the first complete reply beginning
+  `$MOTOR_4CH_Encoder_20ms:` proves that the board is present; parsing its four
+  numeric fields separately determines whether feedback is ready.
 - The startup reply window is 150 ms. A timeout remains fail-closed in Boot,
   repeats the zero-motor frame, and retries the complete initialization
-  sequence after 10 seconds. It does not require a reset or latch a
+  sequence after 2 seconds. It does not require a reset or latch a
   clear-before-retry initialization fault.
 - Routine queries use a 30 ms reply window. The captured vendor-board samples
   completed in at most about 24.9 ms from the first request byte, so this
@@ -443,8 +452,10 @@ The motor board is independent of the HC-06 host protocol:
   query timeout/stale does not clear readiness or set the stale fault. Control
   remains possible and critical status publishes the always-on
   `driver_timeout_unsafe` warning plus `encoder_timeout_ignored` while replies
-  are missing. Malformed, implausible, E-stop, host-link, scheduler, arm, and
-  initialization protections are unchanged.
+  are missing. `encoder_sign_ignored` and `drive_mismatch_ignored` latch for
+  the current armed session instead of faulting; disarming clears them.
+  Malformed, implausible, stall, E-stop, host-link, scheduler, arm, and
+  initialization protections remain unchanged.
 
 The driver-board UART remains compiled and allocated in shipped Uno images.
 `ROBOT_DRIVE_ENABLED=0` prevents initialization, polling, and commands; it does

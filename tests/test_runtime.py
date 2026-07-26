@@ -125,6 +125,8 @@ class StatusNameTests(unittest.TestCase):
                 "arm_target_limited",
                 "driver_timeout_unsafe",
                 "encoder_timeout_ignored",
+                "encoder_sign_ignored",
+                "drive_mismatch_ignored",
             ),
         )
 
@@ -444,6 +446,61 @@ class RuntimeSafetyTests(unittest.TestCase):
         runtime._last_status_at = runtime.clock()
         return runtime, link
 
+    def test_menu_button_queues_one_arm_request_without_estop(self):
+        class FakeEvent:
+            @staticmethod
+            def pump():
+                pass
+
+        class FakePygame:
+            event = FakeEvent()
+
+        class FakeJoystick:
+            def __init__(self):
+                self.buttons = [0] * 8
+                self.buttons[7] = 1
+
+            @staticmethod
+            def get_init():
+                return True
+
+            @staticmethod
+            def get_name():
+                return "test controller"
+
+            @staticmethod
+            def get_axis(index):
+                return -1.0 if index in (4, 5) else 0.0
+
+            def get_numbuttons(self):
+                return len(self.buttons)
+
+            def get_button(self, index):
+                return self.buttons[index]
+
+            @staticmethod
+            def get_numhats():
+                return 1
+
+            @staticmethod
+            def get_hat(_):
+                return (0, 0)
+
+        runtime, _ = self.make_connected_runtime()
+        runtime._pygame = FakePygame()
+        runtime._joystick = FakeJoystick()
+
+        runtime._read_controller()
+        self.assertEqual(runtime._commands.qsize(), 1)
+        self.assertEqual(runtime._commands.get_nowait().action, "arm")
+        self.assertFalse(runtime._critical_estop.is_set())
+        self.assertEqual(
+            runtime._events[-1]["message"], "Controller Menu requested ARM"
+        )
+
+        runtime._read_controller()
+        self.assertTrue(runtime._commands.empty())
+
     def test_estop_priority_path_sends_three_dedicated_fast_frames(self):
         runtime, link = self.make_connected_runtime()
         for _ in range(32):
@@ -563,6 +620,37 @@ class RuntimeSafetyTests(unittest.TestCase):
         stale = runtime.snapshot()
         self.assertFalse(stale["status_fresh"])
         self.assertEqual(stale["state_name"], "UNKNOWN")
+
+    def test_fault_flag_rising_edge_records_one_named_timed_error(self):
+        runtime, _ = self.make_connected_runtime()
+        packet = decode_message(
+            critical_status(state=4, faults=0x000C, last_control=0)
+        )
+        with patch("robot_control.runtime.time.time", return_value=1234.5):
+            runtime._handle_message(packet, runtime.clock())
+            runtime._handle_message(packet, runtime.clock())
+
+        fault_events = [
+            event
+            for event in runtime._events
+            if "Firmware FAULT flags appeared" in event["message"]
+        ]
+        self.assertEqual(len(fault_events), 1)
+        self.assertEqual(fault_events[0]["time"], 1234.5)
+        self.assertIn("encoder_stale, encoder_malformed", fault_events[0]["message"])
+        self.assertIn("new=0x000C, active=0x000C", fault_events[0]["message"])
+
+        runtime._handle_message(
+            decode_message(critical_status(state=1, faults=0, last_control=0))
+        )
+        runtime._handle_message(packet)
+        self.assertEqual(
+            sum(
+                "Firmware FAULT flags appeared" in event["message"]
+                for event in runtime._events
+            ),
+            2,
+        )
 
     def test_link_alive_false_keeps_arm_unavailable(self):
         runtime, _ = self.make_connected_runtime()

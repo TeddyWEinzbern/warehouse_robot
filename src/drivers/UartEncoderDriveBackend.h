@@ -71,6 +71,9 @@ class UartEncoderDriveBackend : public DriveBackend {
     int16_t previousTargetMmS_[4];
     int16_t previousMeasuredMmS_[4];
     uint16_t faults_;
+#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+    uint8_t unsafeMotionWarnings_;
+#endif
     uint8_t consecutiveMalformed_;
     uint8_t consecutiveTimeouts_;
     uint8_t implausibleSamples_;

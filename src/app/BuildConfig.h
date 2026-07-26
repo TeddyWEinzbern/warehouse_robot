@@ -70,7 +70,7 @@ constexpr unsigned long MotorBoardBaud = 115200UL;
 
 constexpr uint32_t CommandTimeoutMs = 300UL;
 constexpr uint32_t NeutralQualificationMs = 500UL;
-constexpr uint32_t MotorCommandPeriodUs = 20000UL;
+constexpr uint32_t MotorCommandPeriodUs = 10000UL;
 constexpr uint32_t ZeroRepeatPeriodUs = 50000UL;
 constexpr uint32_t EncoderQueryPeriodUs = 20000UL;
 constexpr uint32_t ChassisRampPeriodUs = 10000UL;
@@ -89,7 +89,7 @@ constexpr uint32_t HostTransmitWindowEndUs =
 constexpr uint32_t EncoderTotalPeriodUs = 500000UL;
 constexpr uint32_t MotorBoardQueryTimeoutMs = 30UL;
 constexpr uint32_t MotorBoardInitializationTimeoutMs = 150UL;
-constexpr uint32_t MotorBoardInitializationRetryMs = 10000UL;
+constexpr uint32_t MotorBoardInitializationRetryMs = 2000UL;
 constexpr uint8_t MotorBoardConsecutiveTimeoutLimit = 3;
 constexpr uint32_t FeedbackStaleMs = 100UL;
 constexpr uint32_t SensorStaleMs = 300UL;

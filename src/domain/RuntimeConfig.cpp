@@ -28,7 +28,17 @@ RuntimeConfig RuntimeConfig::defaults() {
     result.chassis.maximumLateralMmS = 1000;
     result.chassis.maximumYawMradS = 3000;
     result.chassis.maximumWheelMmS = config::HardWheelLimitMmS;
-    result.chassis.acceleration = {500, 800, 400, 800, 400, 700, 1200, 2000, 40};
+    result.chassis.acceleration = {
+        1500,   // forward acceleration, mm/s^2
+        3000,   // forward deceleration, mm/s^2
+        1500,   // reverse acceleration, mm/s^2
+        3000,   // reverse deceleration, mm/s^2
+        1000,   // lateral acceleration, mm/s^2
+        2000,   // lateral deceleration, mm/s^2
+        4000,  // rotational acceleration, mrad/s^2
+        8000,  // rotational deceleration, mrad/s^2
+        40     // direction-change zero hold, ms
+    };
     result.chassis.translationZeroThresholdMmS = 10;
     result.chassis.rotationZeroThresholdMradS = 20;
     result.arm = {

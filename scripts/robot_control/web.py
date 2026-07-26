@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from datetime import datetime
 import json
 from pathlib import Path
 import socket
@@ -13,6 +14,18 @@ from typing import Any
 from .runtime import RobotRuntime
 
 STATIC_ROOT = Path(__file__).with_name("web_static")
+
+
+def _local_timestamp(epoch_seconds: Any | None = None) -> str:
+    try:
+        instant = (
+            datetime.now().astimezone()
+            if epoch_seconds is None
+            else datetime.fromtimestamp(float(epoch_seconds)).astimezone()
+        )
+    except (OSError, OverflowError, TypeError, ValueError):
+        instant = datetime.now().astimezone()
+    return instant.isoformat(timespec="seconds")
 
 
 def reserve_dashboard_socket(host: str, port: int) -> socket.socket:
@@ -87,7 +100,12 @@ class SnapshotHub:
                 if key not in self._reported_error_events:
                     self._reported_error_events.add(key)
                     if message != fatal_error:
-                        print(f"Runtime error: {message}", file=sys.stderr, flush=True)
+                        print(
+                            f"[{_local_timestamp(event.get('time'))}] "
+                            f"Runtime error: {message}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
 
         last_error = status.get("last_error")
         if not isinstance(last_error, str):
@@ -97,11 +115,19 @@ class SnapshotHub:
         elif last_error != self._reported_last_error:
             self._reported_last_error = last_error
             if last_error not in event_messages:
-                print(f"Runtime error: {last_error}", file=sys.stderr, flush=True)
+                print(
+                    f"[{_local_timestamp()}] Runtime error: {last_error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         if fatal_error and fatal_error != self._reported_fatal_error:
             self._reported_fatal_error = fatal_error
-            print(f"Runtime fatal error: {fatal_error}", file=sys.stderr, flush=True)
+            print(
+                f"[{_local_timestamp()}] Runtime fatal error: {fatal_error}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     async def _broadcast(self) -> None:
         previous = ""

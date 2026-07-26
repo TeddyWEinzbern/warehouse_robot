@@ -74,6 +74,8 @@ DRIVE_WARNING_NAMES = {
     1: "arm_target_limited",
     2: "driver_timeout_unsafe",
     3: "encoder_timeout_ignored",
+    4: "encoder_sign_ignored",
+    5: "drive_mismatch_ignored",
 }
 
 HELP_TEXT = """arm commands:

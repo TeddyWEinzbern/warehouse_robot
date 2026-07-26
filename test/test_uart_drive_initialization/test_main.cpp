@@ -27,6 +27,14 @@ void advanceToInitializationQuery(
     TEST_ASSERT_EQUAL_UINT8(1, backend.outstandingQuery());
     TEST_ASSERT_NOT_EQUAL(
         std::string::npos,
+        serial.transmit().find("$MOTOR_4CH_SET:1!")
+    );
+    TEST_ASSERT_EQUAL(
+        std::string::npos,
+        serial.transmit().find("$MOTOR_4CH_SET:0!")
+    );
+    TEST_ASSERT_NOT_EQUAL(
+        std::string::npos,
         serial.transmit().find("$MOTOR_4CH_READ:encoder_20ms!")
     );
 }
@@ -62,6 +70,15 @@ void startNormalEncoderQuery(
     serviceAt(backend, runtime, nowMs);
     TEST_ASSERT_EQUAL_UINT8(1, backend.outstandingQuery());
 }
+
+void receiveIncrement(
+    UartEncoderDriveBackend &backend, HardwareSerial &serial,
+    const RuntimeConfig &runtime, uint32_t nowMs, const char *frame
+) {
+    startNormalEncoderQuery(backend, runtime, nowMs);
+    serial.queueReceive(frame);
+    backend.pollReceive(nowMs, runtime);
+}
 }
 
 void test_initialization_waits_150_ms_then_enters_zero_output_retry() {
@@ -82,32 +99,36 @@ void test_initialization_waits_150_ms_then_enters_zero_output_retry() {
     serial.clearTransmit();
     backend.setWheelTargets({200, -200, 200, -200});
     backend.onMotorDeadline(450, false, runtime);
-    for (uint32_t nowMs = 450; nowMs < 10449; nowMs += 50)
+    const uint32_t retryAtMs =
+        450UL + config::MotorBoardInitializationRetryMs;
+    for (uint32_t nowMs = 450; nowMs < retryAtMs; nowMs += 50)
         serviceAt(backend, runtime, nowMs);
     assertOnlyZeroFrames(serial.transmit());
 }
 
-void test_initialization_retries_at_10_second_boundary() {
+void test_initialization_retries_at_configured_boundary() {
     HardwareSerial serial;
     UartEncoderDriveBackend backend(serial);
     const RuntimeConfig runtime = RuntimeConfig::defaults();
     advanceToInitializationQuery(backend, serial, runtime);
     backend.pollReceive(450, runtime);
 
-    serviceAt(backend, runtime, 10449);
+    const uint32_t retryAtMs =
+        450UL + config::MotorBoardInitializationRetryMs;
+    serviceAt(backend, runtime, retryAtMs - 1UL);
     serial.clearTransmit();
-    serviceAt(backend, runtime, 10450);
+    serviceAt(backend, runtime, retryAtMs);
     TEST_ASSERT_TRUE(serial.transmit().empty());
 
     serial.clearTransmit();
-    serviceAt(backend, runtime, 10549);
+    serviceAt(backend, runtime, retryAtMs + 99UL);
     assertOnlyZeroFrames(serial.transmit());
 
     serial.clearTransmit();
-    serviceAt(backend, runtime, 10550);
+    serviceAt(backend, runtime, retryAtMs + 100UL);
     TEST_ASSERT_NOT_EQUAL(
         std::string::npos,
-        serial.transmit().find("$MOTOR_4CH_SET:0!")
+        serial.transmit().find("$MOTOR_4CH_SET:1!")
     );
 }
 
@@ -306,6 +327,30 @@ void test_feedback_becomes_stale_at_the_configured_threshold() {
         (backend.health(549).faults & FaultEncoderStale) != 0
     );
 }
+
+#if !ROBOT_CALIBRATION
+void test_motion_sign_and_mismatch_remain_faults_in_safe_robot_build() {
+    HardwareSerial serial;
+    UartEncoderDriveBackend backend(serial);
+    const RuntimeConfig runtime = RuntimeConfig::defaults();
+    initializeWithValidFeedback(backend, serial, runtime);
+
+    backend.setWheelTargets({200, 0, 0, 0});
+    backend.onMotorDeadline(450, true, runtime);
+    receiveIncrement(
+        backend, serial, runtime, 451,
+        "$MOTOR_4CH_Encoder_20ms:100,0,0,0!"
+    );
+    receiveIncrement(
+        backend, serial, runtime, 1202,
+        "$MOTOR_4CH_Encoder_20ms:100,0,0,0!"
+    );
+
+    const uint16_t faults = backend.health(1202).faults;
+    TEST_ASSERT_TRUE((faults & FaultEncoderSign) != 0);
+    TEST_ASSERT_TRUE((faults & FaultDriveMismatch) != 0);
+}
+#endif
 #else
 void test_unsafe_timeouts_keep_ready_and_raise_warnings() {
     HardwareSerial serial;
@@ -362,6 +407,44 @@ void test_unsafe_sample_age_keeps_feedback_healthy_with_warning() {
     TEST_ASSERT_TRUE(stale.feedbackHealthy);
     TEST_ASSERT_TRUE(
         (stale.warnings & WarningEncoderTimeoutIgnored) != 0
+    );
+}
+
+void test_unsafe_motion_checks_latch_warnings_until_disarm() {
+    HardwareSerial serial;
+    UartEncoderDriveBackend backend(serial);
+    const RuntimeConfig runtime = RuntimeConfig::defaults();
+    initializeWithValidFeedback(backend, serial, runtime);
+
+    backend.setWheelTargets({200, 0, 0, 0});
+    backend.onMotorDeadline(450, true, runtime);
+    receiveIncrement(
+        backend, serial, runtime, 451,
+        "$MOTOR_4CH_Encoder_20ms:100,0,0,0!"
+    );
+    receiveIncrement(
+        backend, serial, runtime, 1202,
+        "$MOTOR_4CH_Encoder_20ms:100,0,0,0!"
+    );
+
+    const DriveHealth ignored = backend.health(1202);
+    TEST_ASSERT_EQUAL_UINT16(
+        0, ignored.faults & (FaultEncoderSign | FaultDriveMismatch)
+    );
+    TEST_ASSERT_TRUE(
+        (ignored.warnings & WarningEncoderSignIgnored) != 0
+    );
+    TEST_ASSERT_TRUE(
+        (ignored.warnings & WarningDriveMismatchIgnored) != 0
+    );
+
+    backend.setWheelTargets({0, 0, 0, 0});
+    backend.onMotorDeadline(1203, false, runtime);
+    const uint16_t disarmedWarnings = backend.health(1203).warnings;
+    TEST_ASSERT_EQUAL_UINT16(
+        0,
+        disarmedWarnings &
+            (WarningEncoderSignIgnored | WarningDriveMismatchIgnored)
     );
 }
 #endif
@@ -479,7 +562,7 @@ int main(int, char **) {
     RUN_TEST(
         test_initialization_waits_150_ms_then_enters_zero_output_retry
     );
-    RUN_TEST(test_initialization_retries_at_10_second_boundary);
+    RUN_TEST(test_initialization_retries_at_configured_boundary);
     RUN_TEST(test_vendor_prefix_alone_initializes_without_fake_feedback);
     RUN_TEST(test_one_parseable_vendor_reply_is_enough_for_feedback);
     RUN_TEST(test_normal_query_accepts_a_legal_reply_after_15_ms);
@@ -497,10 +580,16 @@ int main(int, char **) {
     RUN_TEST(
         test_feedback_becomes_stale_at_the_configured_threshold
     );
+#if !ROBOT_CALIBRATION
+    RUN_TEST(test_motion_sign_and_mismatch_remain_faults_in_safe_robot_build);
+#endif
 #else
     RUN_TEST(test_unsafe_timeouts_keep_ready_and_raise_warnings);
     RUN_TEST(
         test_unsafe_sample_age_keeps_feedback_healthy_with_warning
+    );
+    RUN_TEST(
+        test_unsafe_motion_checks_latch_warnings_until_disarm
     );
 #endif
 #if ROBOT_CALIBRATION
