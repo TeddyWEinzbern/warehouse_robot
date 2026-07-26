@@ -271,7 +271,7 @@ void test_single_timeout_keeps_sample_and_success_resets_the_streak() {
     TEST_ASSERT_EQUAL_UINT16(0, backend.health(544).faults);
 }
 
-#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if !ROBOT_FAULT_STATE_UNSAFE
 void test_three_consecutive_normal_query_timeouts_latch_stale_fault() {
     HardwareSerial serial;
     UartEncoderDriveBackend backend(serial);
@@ -352,7 +352,7 @@ void test_motion_sign_and_mismatch_remain_faults_in_safe_robot_build() {
 }
 #endif
 #else
-void test_unsafe_timeouts_keep_ready_and_raise_warnings() {
+void test_unsafe_timeouts_keep_ready_and_latch_visible_faults() {
     HardwareSerial serial;
     UartEncoderDriveBackend backend(serial);
     const RuntimeConfig runtime = RuntimeConfig::defaults();
@@ -370,12 +370,12 @@ void test_unsafe_timeouts_keep_ready_and_raise_warnings() {
     }
 
     const DriveHealth timedOut = backend.health(542);
-    TEST_ASSERT_EQUAL_UINT16(0, timedOut.faults);
+    TEST_ASSERT_TRUE((timedOut.faults & FaultEncoderStale) != 0);
     TEST_ASSERT_TRUE(timedOut.initialized);
     TEST_ASSERT_TRUE(timedOut.feedbackReady);
     TEST_ASSERT_TRUE(timedOut.feedbackHealthy);
     TEST_ASSERT_TRUE(
-        (timedOut.warnings & WarningDriverTimeoutUnsafe) != 0
+        (timedOut.warnings & WarningFaultStateUnsafe) != 0
     );
     TEST_ASSERT_TRUE(
         (timedOut.warnings & WarningEncoderTimeoutIgnored) != 0
@@ -385,10 +385,10 @@ void test_unsafe_timeouts_keep_ready_and_raise_warnings() {
     serial.queueReceive("$MOTOR_4CH_Encoder_20ms:1,2,3,4!");
     backend.pollReceive(544, runtime);
     const DriveHealth recovered = backend.health(544);
-    TEST_ASSERT_EQUAL_UINT16(0, recovered.faults);
+    TEST_ASSERT_TRUE((recovered.faults & FaultEncoderStale) != 0);
     TEST_ASSERT_TRUE(recovered.feedbackHealthy);
     TEST_ASSERT_TRUE(
-        (recovered.warnings & WarningDriverTimeoutUnsafe) != 0
+        (recovered.warnings & WarningFaultStateUnsafe) != 0
     );
     TEST_ASSERT_EQUAL_UINT16(
         0, recovered.warnings & WarningEncoderTimeoutIgnored
@@ -401,8 +401,9 @@ void test_unsafe_sample_age_keeps_feedback_healthy_with_warning() {
     const RuntimeConfig runtime = RuntimeConfig::defaults();
     initializeWithValidFeedback(backend, serial, runtime);
 
+    backend.pollReceive(549, runtime);
     const DriveHealth stale = backend.health(549);
-    TEST_ASSERT_EQUAL_UINT16(0, stale.faults);
+    TEST_ASSERT_TRUE((stale.faults & FaultEncoderStale) != 0);
     TEST_ASSERT_TRUE(stale.feedbackReady);
     TEST_ASSERT_TRUE(stale.feedbackHealthy);
     TEST_ASSERT_TRUE(
@@ -429,7 +430,8 @@ void test_unsafe_motion_checks_latch_warnings_until_disarm() {
 
     const DriveHealth ignored = backend.health(1202);
     TEST_ASSERT_EQUAL_UINT16(
-        0, ignored.faults & (FaultEncoderSign | FaultDriveMismatch)
+        FaultEncoderSign | FaultDriveMismatch,
+        ignored.faults & (FaultEncoderSign | FaultDriveMismatch)
     );
     TEST_ASSERT_TRUE(
         (ignored.warnings & WarningEncoderSignIgnored) != 0
@@ -573,7 +575,7 @@ int main(int, char **) {
     RUN_TEST(
         test_single_timeout_keeps_sample_and_success_resets_the_streak
     );
-#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if !ROBOT_FAULT_STATE_UNSAFE
     RUN_TEST(
         test_three_consecutive_normal_query_timeouts_latch_stale_fault
     );
@@ -584,7 +586,7 @@ int main(int, char **) {
     RUN_TEST(test_motion_sign_and_mismatch_remain_faults_in_safe_robot_build);
 #endif
 #else
-    RUN_TEST(test_unsafe_timeouts_keep_ready_and_raise_warnings);
+    RUN_TEST(test_unsafe_timeouts_keep_ready_and_latch_visible_faults);
     RUN_TEST(
         test_unsafe_sample_age_keeps_feedback_healthy_with_warning
     );

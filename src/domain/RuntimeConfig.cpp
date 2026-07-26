@@ -23,20 +23,20 @@ RuntimeConfig RuntimeConfig::defaults() {
     result.encoder.wheelTrackMm = config::WheelTrackMm;
     result.encoder.wheelbaseMm = config::WheelbaseMm;
     result.encoder.semantics = EncoderSampleSemantics::ProvisionalFixed20Ms;
-    result.chassis.maximumForwardMmS = 1000;
-    result.chassis.maximumReverseMmS = 1000;
-    result.chassis.maximumLateralMmS = 1000;
-    result.chassis.maximumYawMradS = 3000;
+    result.chassis.maximumForwardMmS = 450;
+    result.chassis.maximumReverseMmS = 450;
+    result.chassis.maximumLateralMmS = 250;
+    result.chassis.maximumYawMradS = 1500;
     result.chassis.maximumWheelMmS = config::HardWheelLimitMmS;
     result.chassis.acceleration = {
-        1500,   // forward acceleration, mm/s^2
-        3000,   // forward deceleration, mm/s^2
-        1500,   // reverse acceleration, mm/s^2
-        3000,   // reverse deceleration, mm/s^2
-        1000,   // lateral acceleration, mm/s^2
-        2000,   // lateral deceleration, mm/s^2
-        4000,  // rotational acceleration, mrad/s^2
-        8000,  // rotational deceleration, mrad/s^2
+        600,   // forward acceleration, mm/s^2
+        1500,   // forward deceleration, mm/s^2
+        600,   // reverse acceleration, mm/s^2
+        1500,   // reverse deceleration, mm/s^2
+        500,   // lateral acceleration, mm/s^2
+        1500,   // lateral deceleration, mm/s^2
+        3000,  // rotational acceleration, mrad/s^2
+        6000,  // rotational deceleration, mrad/s^2
         40     // direction-change zero hold, ms
     };
     result.chassis.translationZeroThresholdMmS = 10;

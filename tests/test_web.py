@@ -174,6 +174,7 @@ class MinimalSafetySurfaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Runtime parameters", html)
         self.assertNotIn("/api/parameter", javascript)
         self.assertNotIn("refresh_parameters", javascript)
+        self.assertIn("data.fault_state_unsafe", javascript)
         self.assertIn(".button.arm:hover:not(:disabled)", stylesheet)
         self.assertIn(".button.estop:hover:not(:disabled)", stylesheet)
 

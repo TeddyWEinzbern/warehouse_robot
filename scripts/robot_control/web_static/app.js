@@ -123,7 +123,10 @@ function render(data) {
   const primary = $("primary-action");
   if (state === "ARMED") {
     setAction(primary, "Disarm", "disarm", connected && fresh);
-  } else if (state === "FAULT") {
+  } else if (
+    state === "FAULT"
+    || (state === "DISARMED" && data.fault_state_unsafe && (data.faults || 0))
+  ) {
     setAction(primary, "Clear fault", "clear_fault", connected && fresh);
   } else {
     const canArm = state === "DISARMED"

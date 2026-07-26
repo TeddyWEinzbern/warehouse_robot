@@ -104,7 +104,7 @@ crc8
 | Host → Uno | Arm | `0x03` | Request ARM through the complete safety gate |
 | Host → Uno | Disarm | `0x04` | Request immediate safe disarm |
 | Host → Uno | Clear E-stop | `0x05` | Clear a latched E-stop when neutral and otherwise eligible |
-| Host → Uno | Clear fault | `0x06` | Clear eligible latched faults; does not ARM |
+| Host → Uno | Clear fault | `0x06` | Clear eligible latched faults from normal Fault or unsafe Disarmed; does not ARM |
 | Host → Uno | Calibration arm move | `0x10` | Calibration-only guarded arm movement |
 | Host → Uno | Calibration joint reference | `0x11` | Calibration-only joint reference/update |
 | Host → Uno | Calibration drive spin | `0x12` | Calibration-only bounded wheel command |
@@ -158,7 +158,9 @@ and `2` for closed-loop. `baud_div_1200` is `8` at 9600 baud and `32` at
 38400 baud.
 
 Critical `state` values are `0` Boot, `1` Disarmed, `2` Armed, `3` E-stop, and
-`4` Fault. Fault bits are:
+`4` Fault. Normal images select state `4` whenever a fault is latched. Explicit
+`_unsafe` images retain the same fault bits in telemetry but do not select
+state `4` from them. Fault bits are:
 
 | Bit | Fault |
 | ---: | --- |
@@ -173,7 +175,7 @@ Critical `state` values are `0` Boot, `1` Disarmed, `2` Armed, `3` E-stop, and
 | 8 | arm target |
 
 Warning bits are bit 0 drive unqualified, bit 1 arm target limited, bit 2
-driver-timeout unsafe build active, bit 3 encoder timeout ignored, bit 4
+fault-state unsafe build active, bit 3 encoder timeout ignored, bit 4
 encoder sign ignored, and bit 5 drive mismatch ignored.
 NACK reasons are `1` malformed, `2` unsupported, `3` invalid state, and `4`
 validation failure.
@@ -384,24 +386,24 @@ measurement of live stack headroom.
 | Image | Flash | Static SRAM | Static free |
 | --- | ---: | ---: | ---: |
 | v2 closed-loop robot (`ba4b8ad`) | 31,668 B (98.2%) | 1,812 B (88.5%) | 236 B |
-| v3 `robot` | 28,138 B (87.2%) | 1,311 B (64.0%) | 737 B |
-| v3 `robot_unsafe` | 28,110 B (87.1%) | 1,312 B (64.1%) | 736 B |
-| v3 qualified robot + sonar | 30,250 B (93.8%) | 1,331 B (65.0%) | 717 B |
+| v3 `robot` | 28,180 B (87.4%) | 1,311 B (64.0%) | 737 B |
+| v3 `robot_unsafe` | 28,302 B (87.7%) | 1,312 B (64.1%) | 736 B |
+| v3 qualified robot + sonar | 30,292 B (93.9%) | 1,331 B (65.0%) | 717 B |
 | v2 calibration (`ba4b8ad`) | 31,844 B (98.7%) | 1,835 B (89.6%) | 213 B |
-| v3 `calibration` | 23,522 B (72.9%) | 1,463 B (71.4%) | 585 B |
-| v3 `calibration_unsafe` | 23,480 B (72.8%) | 1,464 B (71.5%) | 584 B |
+| v3 `calibration` | 23,566 B (73.1%) | 1,463 B (71.4%) | 585 B |
+| v3 `calibration_unsafe` | 23,654 B (73.3%) | 1,464 B (71.5%) | 584 B |
 
 The fair production comparison is v2 closed-loop against v3 qualified
-closed-loop: flash falls by 3,530 bytes (11.1%), static SRAM by 501 bytes
+closed-loop: flash falls by 3,488 bytes (11.0%), static SRAM by 501 bytes
 (27.6%), and static free SRAM rises from 236 to 737 bytes. For calibration,
-flash falls by 8,322 bytes (26.1%) and static SRAM by 372 bytes (20.3%).
+flash falls by 8,278 bytes (26.0%) and static SRAM by 372 bytes (20.3%).
 
 The production-only pruning removes calibration command state/ACK handling
 and the unused periodic encoder-total path. At that measured step it reduced
 the worst-case sonar image from 31,746-byte/1,394-byte to
 30,076-byte/1,330-byte: 1,670 bytes of Flash and 64 bytes of SRAM recovered.
 Subsequent drive-health and warning hardening brings the current image to
-30,250-byte/1,331-byte. Calibration retains encoder-total queries and reports,
+30,292-byte/1,331-byte. Calibration retains encoder-total queries and reports,
 plus the read-only driver initialization counters used to distinguish an
 electrically silent D0 input from rejected or missing motor-board replies.
 
@@ -409,7 +411,7 @@ The linked v3 matrix contains no application-visible `malloc`, `calloc`,
 `realloc`, `free`, or C++ allocator symbols. The 256-byte live watermark gate
 still applies because static free SRAM does not include worst-case call
 frames, interrupt nesting, or library stack use. The sonar-enabled production
-variant has 2,006 bytes of flash remaining; keep that build in CI and treat
+variant has 1,964 bytes of flash remaining; keep that build in CI and treat
 any material growth as a resource review trigger.
 
 ## Motor-board UART contract
@@ -422,8 +424,8 @@ The motor board is independent of the HC-06 host protocol:
 - `$MOTOR_4CH_READ:encoder_total!` requests calibration-only cumulative encoder
   counts. It is serialized through the same parser; production health and stall
   checks use the 20 ms increments.
-- DISARM, link loss, E-stop, disabled drive, and drive faults converge on
-  `$Car:0,0,0,0!`.
+- DISARM, link loss, E-stop, disabled drive, and—in normal images—drive faults
+  converge on `$Car:0,0,0,0!`.
 - Startup sends `$MOTOR_4CH_SET:1!` to select the installed TT motors, then
   `$MOTOR_4CH_SET_ENCPDER_POLARITY:0!`, preserving the vendor command's
   `ENCPDER` spelling, before making one encoder-increment request. As in the
@@ -449,13 +451,14 @@ The motor board is independent of the HC-06 host protocol:
 - The explicitly named `robot_unsafe` and `calibration_unsafe` images still
   require the vendor-prefixed initialization reply; normal robot arming also
   requires at least one parseable encoder sample. After feedback is Ready,
-  query timeout/stale does not clear readiness or set the stale fault. Control
-  remains possible and critical status publishes the always-on
-  `driver_timeout_unsafe` warning plus `encoder_timeout_ignored` while replies
-  are missing. `encoder_sign_ignored` and `drive_mismatch_ignored` latch for
-  the current armed session instead of faulting; disarming clears them.
-  Malformed, implausible, stall, E-stop, host-link, scheduler, arm, and
-  initialization protections remain unchanged.
+  every detected fault still sets its normal fault bit, but no fault bit can
+  select the global `FAULT` state. The always-on warning is
+  `fault_state_unsafe`; encoder timeout, sign, and mismatch additionally set
+  their specific `*_ignored` warnings. Timeout and malformed replies preserve
+  the last valid readiness sample so an already-armed diagnostic run can
+  continue. E-stop still selects E-stop, link loss still DISARMs, startup still
+  requires the vendor reply, and the host still requires fault-free status for
+  a new ARM. Unsafe DISARMED status with active fault bits accepts CLEAR FAULT.
 
 The driver-board UART remains compiled and allocated in shipped Uno images.
 `ROBOT_DRIVE_ENABLED=0` prevents initialization, polling, and commands; it does

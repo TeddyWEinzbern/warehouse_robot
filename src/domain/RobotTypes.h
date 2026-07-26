@@ -54,7 +54,7 @@ enum WarningCode : uint16_t {
     WarningNone = 0,
     WarningDriveUnqualified = 1U << 0,
     WarningArmTargetLimited = 1U << 1,
-    WarningDriverTimeoutUnsafe = 1U << 2,
+    WarningFaultStateUnsafe = 1U << 2,
     WarningEncoderTimeoutIgnored = 1U << 3,
     WarningEncoderSignIgnored = 1U << 4,
     WarningDriveMismatchIgnored = 1U << 5,

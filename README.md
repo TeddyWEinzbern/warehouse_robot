@@ -3,8 +3,8 @@
 Safety-oriented Arduino Uno firmware and a Python host console for a four-wheel
 mecanum warehouse robot. The normal deployable firmware environments are
 `robot` and `calibration`; each has an explicitly degraded `_unsafe`
-counterpart for raised-wheel driver-timeout diagnosis only. Host-native tests
-use `native`, plus `native_calibration` and `native_unsafe`.
+counterpart for raised-wheel fault diagnosis only. Host-native tests use
+`native`, plus `native_calibration` and `native_unsafe`.
 
 The UART motor board owns the wheel-speed controller:
 
@@ -20,9 +20,10 @@ The UART motor board owns the wheel-speed controller:
   30 Hz and the vendor board's own wheel-speed PID remains 50 Hz, so the 10 ms
   target period is not an end-to-end 10 ms response guarantee.
 
-Compiled chassis ramp defaults are longitudinal 1,500 mm/s² acceleration and
-3,000 mm/s² deceleration, lateral 1,000/2,000 mm/s², yaw
-4,000/8,000 mrad/s², with a 40 ms hold at a commanded direction reversal.
+Compiled chassis limits are 450 mm/s longitudinal, 250 mm/s lateral, and
+1,500 mrad/s yaw. Ramp defaults are longitudinal 600/1,500 mm/s²
+acceleration/deceleration, lateral 500/1,500 mm/s², yaw 3,000/6,000 mrad/s²,
+with a 40 ms hold at a commanded direction reversal.
 
 Wheel order, signs, geometry, counts/revolution, arm limits, and qualification
 are established with [the calibration checklist](docs/calibration.md). A
@@ -53,8 +54,8 @@ Calibration uses explicit on-demand command/reply messages. See
 [protocol-v3.md](docs/protocol-v3.md) for the wire contract.
 
 Every firmware loop pass applies link timeout, E-stop, fault, and enable gates
-before motion. Disarm, link loss, E-stop, and critical faults request the exact
-motor-board zero command without waiting for a ramp.
+before motion. In the normal images, disarm, link loss, E-stop, and critical
+faults request the exact motor-board zero command without waiting for a ramp.
 
 ## Build environments
 
@@ -66,8 +67,8 @@ pio run -e calibration
 # Normal robot image. Closed-loop control and 9600 baud are the defaults.
 pio run -e robot
 
-# Raised-wheel diagnosis only: post-Ready encoder timeout/stale becomes a
-# visible warning and does not block control.
+# Raised-wheel diagnosis only: fault bits remain visible but cannot select
+# the firmware FAULT state.
 pio run -e robot_unsafe
 pio run -e calibration_unsafe
 
@@ -90,8 +91,11 @@ The feature flags are intentionally separated by meaning:
 | `ROBOT_ARM_CALIBRATED` | Records completed arm calibration. It does not enable the arm. |
 | `ROBOT_SENSOR_ENABLED` | Functional sonar gate; omitted means `0`. Disabled sensors remain allocated but their pins and scheduler are not activated. The shipped `calibration` environment selects `1` so sensors can be qualified. |
 | `ROBOT_CALIBRATION` | Selects the calibration firmware personality. Set by the `calibration` environment. |
-| `ROBOT_DRIVER_TIMEOUT_UNSAFE` | Explicitly degrades post-Ready encoder timeout/stale, encoder-sign, and drive-mismatch handling from fault to warning. Initialization still requires the vendor reply, normal arming still requires one parseable feedback sample, and malformed, implausible, stall, and unrelated faults are not bypassed. |
+| `ROBOT_FAULT_STATE_UNSAFE` | Makes every fault bit telemetry-only for state selection: bits still latch and remain visible, but cannot move an `_unsafe` image into `FAULT`. Startup qualification, E-stop, link-loss DISARM, and host-side fault-free ARM remain enforced. |
 | `ROBOT_HOST_BAUD` | HC-06 UART baud: `9600UL` by default or `38400UL`. |
+
+The former `ROBOT_DRIVER_TIMEOUT_UNSAFE` spelling remains a compatibility
+alias, but now selects the same all-fault unsafe behavior.
 
 Preprocessor decisions are kept at structural boundaries: defaults and
 validation live in `BuildConfig.h`, the backend type is selected once in
@@ -106,13 +110,16 @@ emergency disconnect. The calibration image observes the same enable flags, so
 disabled hardware does not become active merely because calibration firmware
 is running.
 
-`robot_unsafe` and `calibration_unsafe` can continue commanding the last
-requested motion after encoder feedback is lost. They always publish
-`driver_timeout_unsafe`, add `encoder_timeout_ignored` while feedback is
-missing, and latch `encoder_sign_ignored` or `drive_mismatch_ignored` for the
-current armed session instead of faulting on those two motion checks. They must
-only be used with every wheel raised and an immediate physical power cutoff
-available. Never deploy either image for ground operation.
+`robot_unsafe` and `calibration_unsafe` never select `FAULT` because of a fault
+bit. The bits still latch in critical status, and the images always publish
+`fault_state_unsafe`; encoder timeout, sign, and mismatch also retain their
+specific `*_ignored` warnings. An already-armed unsafe robot can therefore
+remain globally ARMED after malformed/implausible encoder data, stall,
+scheduler overrun, or arm faults; subsystem-local fallbacks such as holding the
+last arm command still apply. The host still requires fault-free status for a
+new ARM; while DISARMED it exposes CLEAR FAULT for an explicit retry. These
+images must only be used with every wheel raised and an immediate physical
+power cutoff available. Never deploy either image for ground operation.
 
 To select open-loop board control, replace
 `-DROBOT_DRIVER_CONTROL_CLOSE=1` with
@@ -192,7 +199,7 @@ The loopback-only WebUI is a safety console, not a tuning dashboard. It shows:
 - firmware profile, driver mode, and enabled/calibrated subsystem summary;
 - controller state, pending safety action, and target/actual 30 Hz timing
   including interval and missed-control counts;
-- timestamped local/fatal errors, firmware FAULT flag transitions, and recent
+- timestamped local/fatal errors, firmware fault-bit transitions, and recent
   host safety events.
 
 It has exactly two contextual safety controls:

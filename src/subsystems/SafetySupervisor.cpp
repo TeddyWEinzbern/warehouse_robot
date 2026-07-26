@@ -40,7 +40,8 @@ void SafetySupervisor::update(
 
     if (drive.faults != 0) {
         faults_ |= drive.faults;
-        transition(RobotState::Fault);
+        if (!config::FaultStateUnsafe)
+            transition(RobotState::Fault);
     }
     const bool eStopRequested = (requests.flags & RequestEStop) != 0;
     const bool disarmRequested = (requests.flags & RequestDisarm) != 0;
@@ -69,7 +70,7 @@ void SafetySupervisor::update(
         state_ == RobotState::EStop &&
         (requests.flags & RequestClearEStop) != 0 &&
         neutralQualified) {
-        if (faults_ != 0)
+        if (faults_ != 0 && !config::FaultStateUnsafe)
             transition(RobotState::Fault);
         else
             transition(
@@ -79,8 +80,12 @@ void SafetySupervisor::update(
             );
     }
 
+    const bool clearableFaultState =
+        state_ == RobotState::Fault ||
+        (config::FaultStateUnsafe &&
+         state_ == RobotState::Disarmed && faults_ != 0);
     if (!eStopRequested && !disarmRequested &&
-        state_ == RobotState::Fault &&
+        clearableFaultState &&
         (requests.flags & RequestClearFault) != 0 &&
         drive.feedbackHealthy && neutralQualified) {
         faults_ = 0;
@@ -111,7 +116,8 @@ DriveIntent SafetySupervisor::arbitrate(
 
 void SafetySupervisor::latchFault(uint16_t fault) {
     faults_ |= fault;
-    transition(RobotState::Fault);
+    if (!config::FaultStateUnsafe)
+        transition(RobotState::Fault);
 }
 bool SafetySupervisor::takeImmediateStop() { const bool value = immediateStop_; immediateStop_ = false; return value; }
 bool SafetySupervisor::takeClearFaultAccepted() { const bool value = clearFaultAccepted_; clearFaultAccepted_ = false; return value; }

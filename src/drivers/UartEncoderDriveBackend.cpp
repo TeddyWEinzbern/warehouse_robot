@@ -38,7 +38,7 @@ UartEncoderDriveBackend::UartEncoderDriveBackend(HardwareSerial &serial)
       mismatchSinceMs_{0, 0, 0, 0}, motionStartedAtMs_{0, 0, 0, 0},
       previousTargetMmS_{0, 0, 0, 0}, previousMeasuredMmS_{0, 0, 0, 0},
       faults_(0),
-#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if ROBOT_FAULT_STATE_UNSAFE
       unsafeMotionWarnings_(0),
 #endif
       consecutiveMalformed_(0), consecutiveTimeouts_(0),
@@ -307,10 +307,10 @@ void UartEncoderDriveBackend::pollReceive(uint32_t nowMs, const RuntimeConfig &r
                 ++consecutiveTimeouts_;
             if (consecutiveTimeouts_ >=
                     config::MotorBoardConsecutiveTimeoutLimit) {
-#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if !ROBOT_FAULT_STATE_UNSAFE
                 feedback_.encoderValidMask = 0;
-                faults_ |= FaultEncoderStale;
 #endif
+                faults_ |= FaultEncoderStale;
             }
         }
 #if ROBOT_CALIBRATION
@@ -321,9 +321,7 @@ void UartEncoderDriveBackend::pollReceive(uint32_t nowMs, const RuntimeConfig &r
     }
     if (initStage_ == InitStage::Ready && feedback_.incrementUpdatedAtMs != 0 &&
         nowMs - feedback_.incrementUpdatedAtMs >= config::FeedbackStaleMs) {
-#if !ROBOT_DRIVER_TIMEOUT_UNSAFE
         faults_ |= FaultEncoderStale;
-#endif
     }
 }
 
@@ -337,7 +335,9 @@ void UartEncoderDriveBackend::service(
 void UartEncoderDriveBackend::markMalformed() {
     consecutiveTimeouts_ = 0;
     if (consecutiveMalformed_ != 255) ++consecutiveMalformed_;
+#if !ROBOT_FAULT_STATE_UNSAFE
     feedback_.encoderValidMask = 0;
+#endif
     if (consecutiveMalformed_ >= 3) faults_ |= FaultEncoderMalformed;
 }
 
@@ -450,12 +450,11 @@ void UartEncoderDriveBackend::updateWheelHealth(uint8_t wheel, uint32_t nowMs) {
     if (signBad) {
         if (badSignSinceMs_[wheel] == 0) badSignSinceMs_[wheel] = nowMs;
         else if (nowMs - badSignSinceMs_[wheel] >= 250UL) {
-#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if ROBOT_FAULT_STATE_UNSAFE
             unsafeMotionWarnings_ |=
                 static_cast<uint8_t>(WarningEncoderSignIgnored);
-#else
-            faults_ |= FaultEncoderSign;
 #endif
+            faults_ |= FaultEncoderSign;
         }
     } else badSignSinceMs_[wheel] = 0;
     const bool settled = motionStartedAtMs_[wheel] != 0 &&
@@ -469,12 +468,11 @@ void UartEncoderDriveBackend::updateWheelHealth(uint8_t wheel, uint32_t nowMs) {
     if (absolute32(static_cast<int32_t>(target) - measured) > allowedError) {
         if (mismatchSinceMs_[wheel] == 0) mismatchSinceMs_[wheel] = nowMs;
         else if (nowMs - mismatchSinceMs_[wheel] >= 750UL) {
-#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if ROBOT_FAULT_STATE_UNSAFE
             unsafeMotionWarnings_ |=
                 static_cast<uint8_t>(WarningDriveMismatchIgnored);
-#else
-            faults_ |= FaultDriveMismatch;
 #endif
+            faults_ |= FaultDriveMismatch;
         }
     } else mismatchSinceMs_[wheel] = 0;
 #endif
@@ -509,7 +507,7 @@ void UartEncoderDriveBackend::noteDiagnosticFrame(const char *message) {
 
 void UartEncoderDriveBackend::setWheelTargets(const WheelTargets &targets) { targets_ = targets; }
 void UartEncoderDriveBackend::onMotorDeadline(uint32_t nowMs, bool armed, const RuntimeConfig &runtime) {
-#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if ROBOT_FAULT_STATE_UNSAFE
     if (armed_ && !armed) unsafeMotionWarnings_ = 0;
 #endif
     armed_ = armed;
@@ -603,20 +601,20 @@ DriveHealth UartEncoderDriveBackend::health(uint32_t nowMs) const {
         feedback_.encoderValidMask == 0x0F;
     uint16_t warnings =
         config::DriveCalibrated ? 0 : WarningDriveUnqualified;
-#if ROBOT_DRIVER_TIMEOUT_UNSAFE
-    warnings |= WarningDriverTimeoutUnsafe;
+#if ROBOT_FAULT_STATE_UNSAFE
+    warnings |= WarningFaultStateUnsafe;
     if (consecutiveTimeouts_ != 0 || (ready && !fresh))
         warnings |= WarningEncoderTimeoutIgnored;
     warnings |= unsafeMotionWarnings_;
 #endif
     return {
         faults_, warnings, initStage_ == InitStage::Ready, ready,
-        ready && (fresh || config::DriverTimeoutUnsafe)
+        ready && (fresh || config::FaultStateUnsafe)
     };
 }
 void UartEncoderDriveBackend::clearFaults() {
     faults_ = 0;
-#if ROBOT_DRIVER_TIMEOUT_UNSAFE
+#if ROBOT_FAULT_STATE_UNSAFE
     unsafeMotionWarnings_ = 0;
 #endif
     consecutiveMalformed_ = 0;

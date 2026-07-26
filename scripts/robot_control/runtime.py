@@ -48,11 +48,12 @@ FAULT_NAMES = (
 WARNING_NAMES = (
     "drive_unqualified",
     "arm_target_limited",
-    "driver_timeout_unsafe",
+    "fault_state_unsafe",
     "encoder_timeout_ignored",
     "encoder_sign_ignored",
     "drive_mismatch_ignored",
 )
+FAULT_STATE_UNSAFE_WARNING = 1 << 2
 
 CONTROL_RATE_HZ = 30.0
 CRITICAL_STATUS_RATE_HZ = 2.0
@@ -344,6 +345,9 @@ class RobotRuntime:
             "fault_names": self._bit_names(faults, FAULT_NAMES),
             "warnings": warnings,
             "warning_names": self._bit_names(warnings, WARNING_NAMES),
+            "fault_state_unsafe": bool(
+                warnings & FAULT_STATE_UNSAFE_WARNING
+            ),
             "last_accepted_control_sequence": (
                 self._critical_status.get("last_accepted_control_sequence")
                 if status_fresh
@@ -659,7 +663,7 @@ class RobotRuntime:
                 names = ", ".join(self._bit_names(new_faults, FAULT_NAMES))
                 self._record_event(
                     "error",
-                    "Firmware FAULT flags appeared: "
+                    "Firmware fault flags appeared: "
                     f"{names} (new=0x{new_faults:04X}, active=0x{faults:04X})",
                 )
             self._critical_status = {
@@ -824,7 +828,12 @@ class RobotRuntime:
         if action == MessageType.CLEAR_ESTOP:
             return state == 3 and self._host_estop_latched
         if action == MessageType.CLEAR_FAULT:
-            return state == 4
+            warnings = int(self._critical_status.get("warnings", 0))
+            return state == 4 or (
+                state == 1
+                and faults != 0
+                and bool(warnings & FAULT_STATE_UNSAFE_WARNING)
+            )
         return False
 
     def _request_clear_estop(self) -> None:
@@ -874,11 +883,23 @@ class RobotRuntime:
         elif action == "clear_estop":
             self._request_clear_estop()
         elif action == "clear_fault":
-            if status_fresh and state == 4:
+            warnings = (
+                int(self._critical_status.get("warnings", 0))
+                if status_fresh
+                else 0
+            )
+            unsafe_disarmed_fault = (
+                state == 1
+                and faults != 0
+                and bool(warnings & FAULT_STATE_UNSAFE_WARNING)
+            )
+            if status_fresh and (state == 4 or unsafe_disarmed_fault):
                 self._pending_neutral_action = MessageType.CLEAR_FAULT
             else:
                 self._record_event(
-                    "error", "Clear fault requires fresh firmware FAULT state"
+                    "error",
+                    "Clear fault requires fresh firmware FAULT state or "
+                    "unsafe DISARMED status with active fault flags",
                 )
         else:
             self._record_event("error", f"Unknown runtime action: {action}")

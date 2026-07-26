@@ -123,7 +123,7 @@ class StatusNameTests(unittest.TestCase):
             (
                 "drive_unqualified",
                 "arm_target_limited",
-                "driver_timeout_unsafe",
+                "fault_state_unsafe",
                 "encoder_timeout_ignored",
                 "encoder_sign_ignored",
                 "drive_mismatch_ignored",
@@ -633,7 +633,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         fault_events = [
             event
             for event in runtime._events
-            if "Firmware FAULT flags appeared" in event["message"]
+            if "Firmware fault flags appeared" in event["message"]
         ]
         self.assertEqual(len(fault_events), 1)
         self.assertEqual(fault_events[0]["time"], 1234.5)
@@ -646,11 +646,29 @@ class RuntimeSafetyTests(unittest.TestCase):
         runtime._handle_message(packet)
         self.assertEqual(
             sum(
-                "Firmware FAULT flags appeared" in event["message"]
+                "Firmware fault flags appeared" in event["message"]
                 for event in runtime._events
             ),
             2,
         )
+
+    def test_unsafe_disarmed_fault_can_queue_clear_fault(self):
+        runtime, _ = self.make_connected_runtime()
+        runtime._critical_status.update(
+            {"state": 1, "faults": 0x0040, "warnings": 0x0004}
+        )
+        runtime._host_estop_latched = False
+        runtime._process_command(RuntimeCommand(6, 0, "clear_fault"))
+        self.assertEqual(
+            runtime._pending_neutral_action, MessageType.CLEAR_FAULT
+        )
+        self.assertTrue(
+            runtime._pending_action_still_safe(
+                MessageType.CLEAR_FAULT, runtime.clock()
+            )
+        )
+        runtime._publish_snapshot()
+        self.assertTrue(runtime.snapshot()["fault_state_unsafe"])
 
     def test_link_alive_false_keeps_arm_unavailable(self):
         runtime, _ = self.make_connected_runtime()

@@ -98,10 +98,10 @@ void test_chassis_ramp_and_controlled_zero_crossing() {
     RuntimeConfig runtime = RuntimeConfig::defaults();
     chassis.setDesired({1000, 0, 0, 1000, IntentSource::Operator}, runtime);
     chassis.trajectoryTick(10000, 10000, runtime);
-    TEST_ASSERT_EQUAL_INT16(15, chassis.rampedVelocity().longitudinalMmS);
+    TEST_ASSERT_EQUAL_INT16(6, chassis.rampedVelocity().longitudinalMmS);
     for (uint32_t now = 20000; now <= 200000; now += 10000)
         chassis.trajectoryTick(now, 10000, runtime);
-    TEST_ASSERT_EQUAL_INT16(300, chassis.rampedVelocity().longitudinalMmS);
+    TEST_ASSERT_EQUAL_INT16(120, chassis.rampedVelocity().longitudinalMmS);
 
     chassis.setDesired({-1000, 0, 0, 1000, IntentSource::Operator}, runtime);
     uint32_t now = 210000;

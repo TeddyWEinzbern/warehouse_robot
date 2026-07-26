@@ -330,7 +330,7 @@ class OnDemandReportTests(unittest.TestCase):
         self.assertIn("firmware state: FAULT", report)
         self.assertIn("faults=0x0004", report)
         self.assertIn(
-            "warnings=driver_timeout_unsafe,encoder_timeout_ignored,"
+            "warnings=fault_state_unsafe,encoder_timeout_ignored,"
             "encoder_sign_ignored,drive_mismatch_ignored",
             report,
         )

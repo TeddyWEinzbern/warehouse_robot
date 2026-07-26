@@ -72,7 +72,7 @@ DRIVER_INIT_STAGE_NAMES = {
 DRIVE_WARNING_NAMES = {
     0: "drive_unqualified",
     1: "arm_target_limited",
-    2: "driver_timeout_unsafe",
+    2: "fault_state_unsafe",
     3: "encoder_timeout_ignored",
     4: "encoder_sign_ignored",
     5: "drive_mismatch_ignored",
