@@ -34,7 +34,7 @@ it is not a feature-enable flag.
 
 ```text
 Gamepad at 30 Hz ───────────┐
-                            ├─ Python safety runtime ─ protocol v3 ─ HC-06 ─ Uno
+                            ├─ Python safety runtime ─ protocol v4 ─ HC-06 ─ Uno
 Two-button local WebUI ─────┘          │                 A4/A5       │
                                       │                              ├─ safety gates
                                       └─ status/events                ├─ arm scheduler
@@ -45,16 +45,16 @@ Motor-board UART D0/D1 <──────────────── bounded
 The normal host stream is deliberately small:
 
 - compact control at 30 Hz at both supported baud rates;
-- dedicated short E-stop frames, sent redundantly until critical status
-  confirms the latch;
+- dedicated urgent-DISARM frames, sent redundantly and kept dominant over
+  queued ARM or clear-fault requests;
 - compact critical status at 2 Hz and immediately after safety-state changes;
 - no periodic detailed telemetry and no remote runtime-parameter writes.
 
 Calibration uses explicit on-demand command/reply messages. See
-[protocol-v3.md](docs/protocol-v3.md) for the wire contract.
+[protocol-v4.md](docs/protocol-v4.md) for the wire contract.
 
-Every firmware loop pass applies link timeout, E-stop, fault, and enable gates
-before motion. In the normal images, disarm, link loss, E-stop, and critical
+Every firmware loop pass applies link timeout, DISARM, fault, READY, and enable
+gates before motion. In the normal images, DISARM, link loss, and critical
 faults request the exact motor-board zero command without waiting for a ramp.
 
 ## Build environments
@@ -91,7 +91,7 @@ The feature flags are intentionally separated by meaning:
 | `ROBOT_ARM_CALIBRATED` | Records completed arm calibration. It does not enable the arm. |
 | `ROBOT_SENSOR_ENABLED` | Functional sonar gate; omitted means `0`. Disabled sensors remain allocated but their pins and scheduler are not activated. The shipped `calibration` environment selects `1` so sensors can be qualified. |
 | `ROBOT_CALIBRATION` | Selects the calibration firmware personality. Set by the `calibration` environment. |
-| `ROBOT_FAULT_STATE_UNSAFE` | Makes every fault bit telemetry-only for state selection: bits still latch and remain visible, but cannot move an `_unsafe` image into `FAULT`. Startup qualification, E-stop, link-loss DISARM, and host-side fault-free ARM remain enforced. |
+| `ROBOT_FAULT_STATE_UNSAFE` | Makes every fault bit telemetry-only for state selection: bits still latch and remain visible, but cannot move an `_unsafe` image into `FAULT`. Startup qualification, urgent DISARM, link-loss DISARM, and fault-free READY/ARM remain enforced. |
 | `ROBOT_HOST_BAUD` | HC-06 UART baud: `9600UL` by default or `38400UL`. |
 
 The former `ROBOT_DRIVER_TIMEOUT_UNSAFE` spelling remains a compatibility
@@ -165,7 +165,7 @@ verification, rollback, and clone/command-set failure cases.
 The link is bidirectional and uses receive/transmit windows; do not add
 unbounded debug text to A4/A5. A Bluetooth settings page may show the module as
 disconnected while no process owns the RFCOMM port. Qualify the connection by
-opening the enumerated serial device and receiving a valid protocol-v3
+opening the enumerated serial device and receiving a valid protocol-v4
 HELLO/status response.
 
 ## Python runtime and WebUI
@@ -195,29 +195,39 @@ The loopback-only WebUI is a safety console, not a tuning dashboard. It shows:
 - HC-06 target, configured serial device, and baud;
 - connection state, protocol verification, status age, and last accepted
   control sequence;
-- robot state plus fault and warning badges;
+- the three-state robot status, authoritative ARM readiness, and fault/warning
+  badges;
 - firmware profile, driver mode, and enabled/calibrated subsystem summary;
 - controller state, pending safety action, and target/actual 30 Hz timing
   including interval and missed-control counts;
 - timestamped local/fatal errors, firmware fault-bit transitions, and recent
   host safety events.
 
-It has exactly two contextual safety controls:
+It has exactly two safety controls:
 
-1. `ARM`, `DISARM`, or `CLEAR FAULT`, according to the current state;
-2. `E-STOP` or `CLEAR E-STOP`, according to the current state.
+1. a primary `ARM`, disabled `ARMED`, or `CLEAR FAULT` control according to
+   state and READY qualification;
+2. an always-visible red `DISARM` control, enabled whenever the host link is
+   connected.
 
 On SDL-recognized Xbox-style controllers, including the Xbox One Elite Series
-2, the named `Menu`/Start control requests ARM and `View`/Back requests CLEAR
-E-STOP; raw platform-specific button numbers are not used. Menu is
-edge-triggered and does not toggle or DISARM. The ARM request still requires
-fresh fault-free DISARMED status, completed calibration, a cleared E-stop, and
-0.6 seconds of neutral control. DISARM and E-STOP remain available from the
-loopback WebUI, and controller loss still latches E-stop.
+2, the named `Menu`/Start control requests ARM and `View`/Back requests urgent
+DISARM; raw platform-specific button numbers are not used. Both are
+edge-triggered. ARM is accepted only while firmware reports `ready_to_arm`,
+which requires DISARMED state, completed initialization/calibration, fresh
+healthy feedback, a live link, no fault bits, and 0.5 seconds of neutral
+control. The host retains its conservative 0.6-second neutral confirmation.
+Controller loss also requests urgent DISARM.
+
+The firmware has only `DISARMED`, `ARMED`, and `FAULT` states. READY is a
+separate firmware-authoritative qualification bit, not a fourth state. In a
+normal image, FAULT can be cleared only by an explicit loopback-WebUI action;
+the official hand-controller and ordinary runtime paths cannot clear it.
+Direct custom serial clients remain inside the trusted protocol boundary.
 
 There are no wheel, encoder, sonar, arm, scheduler, or tuning panels and no
 remote parameter API. Closing the browser does not stop the Python safety
-runtime, control heartbeat, serial supervision, or E-stop handling.
+runtime, control heartbeat, serial supervision, or urgent-DISARM handling.
 
 An optional standalone console bundle can be built with:
 
@@ -228,7 +238,7 @@ python3 -m PyInstaller warehouse_robot_gui.spec
 
 ## Calibration
 
-The interactive protocol-v3 calibration session runs over the same A4/A5
+The interactive protocol-v4 calibration session runs over the same A4/A5
 HC-06 link:
 
 ```sh
@@ -259,7 +269,8 @@ default-off sensor gate are documented in [docs/sensors.md](docs/sensors.md).
 
 All modules require a common ground. Motors and servos require suitable
 external supplies. A physical motor-power cutoff remains mandatory for
-raised-wheel work. Disconnect the D0/D1 motor-board link during Uno upload.
+raised-wheel work; software DISARM is not a substitute for cutting actuator
+power. Disconnect the D0/D1 motor-board link during Uno upload.
 
 The HC-06 RX / Uno TX path must be 3.3 V safe because the Uno transmits 5 V
 logic. Power requirements depend on whether the installed part is a bare 3.3 V
@@ -277,7 +288,7 @@ python3 -m compileall -q scripts tests
 pio test -e native
 pio test -e native_calibration
 pio test -e native_unsafe
-pio run -e robot -e calibration
+pio run -e robot -e calibration -e robot_unsafe -e calibration_unsafe
 pio run -c "$PWD/.github/platformio-variants.ini" \
   -e ci_robot_qualified -e ci_robot_38400 -e ci_robot_open \
   -e ci_robot_arm_only -e ci_robot_sensor -e ci_calibration_38400
@@ -285,16 +296,19 @@ pio run -c "$PWD/.github/platformio-variants.ini" \
 
 The absolute alternate-config path is intentional: PlatformIO must propagate
 that file into its nested build process. These commands verify software
-behavior, build the two supported Uno images, and compile the CI-only flag
+behavior, build the four supported Uno images, and compile the CI-only flag
 matrix. They do not replace:
 
 - raised-wheel drive qualification;
-- physical E-stop and motor-power-cutoff tests;
+- urgent-DISARM latency at both 9600 and 38400 baud, plus the independent
+  motor-power-cutoff test;
+- controller-disconnect and host-link-loss safe-stop tests;
+- FAULT entry and explicit WebUI-only recovery tests;
 - arm alignment and collision-clearance checks;
 - HC-06 bidirectional link tests at the selected baud;
 - sonar wiring/live-reading checks when enabled;
 - a long-duration scheduler and stack-watermark run.
 
-Production host communication accepts protocol v3 only. Legacy ASCII
+Production host communication accepts protocol v4 only. Legacy ASCII
 direct-wheel, chassis, motor, or joint commands are not part of the runtime
 contract.

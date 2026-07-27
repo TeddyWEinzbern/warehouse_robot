@@ -26,7 +26,7 @@ class SafetySupervisor {
     RobotState state() const;
     bool armed() const;
     bool linkAlive() const;
-    bool emergencyStopped() const;
+    bool readyToArm() const;
     uint16_t faults() const;
 
   private:
@@ -35,6 +35,7 @@ class SafetySupervisor {
     uint32_t neutralSinceMs_;
     bool neutralTracking_;
     bool linkAlive_;
+    bool readyToArm_;
     bool immediateStop_;
     bool clearFaultAccepted_;
     static bool neutral(const OperatorControlFrame &frame);

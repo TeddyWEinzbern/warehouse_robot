@@ -200,10 +200,10 @@ def create_app(runtime: RobotRuntime):
     async def action(request: Any):
         body = await json_object(request)
         name = body.get("action")
-        allowed = {"arm", "disarm", "estop", "clear_estop", "clear_fault"}
+        allowed = {"arm", "disarm", "clear_fault"}
         if name not in allowed:
             raise web.HTTPBadRequest(text="unsupported action")
-        if not runtime.submit(name):
+        if not runtime.submit_webui(name):
             raise web.HTTPServiceUnavailable(text="runtime command queue is full")
         return web.json_response({"accepted": True})
 

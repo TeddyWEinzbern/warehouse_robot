@@ -2,6 +2,7 @@
 
 #include "app/PinProfile.h"
 #include "core/StackWatermark.h"
+#include "domain/SafetyGates.h"
 
 #if defined(ARDUINO_ARCH_AVR)
 #include <avr/io.h>
@@ -45,8 +46,9 @@ RobotApplication::RobotApplication()
       chassisMissBaseline_(0),
       lastStatusFaults_(0xFFFFU), lastStatusWarnings_(0xFFFFU),
       consecutiveMotorLate_(0), lastProcessedControlSequence_(0xFF),
-      transmitSequence_(0), previousState_(RobotState::Boot),
+      transmitSequence_(0), previousState_(RobotState::Disarmed),
       lastStatusState_(RobotState::Fault), lastStatusLinkAlive_(true),
+      lastStatusReadyToArm_(true),
       statusPending_(ROBOT_CALIBRATION == 0), helloPending_(false),
       platformInitialized_(false) {}
 
@@ -120,12 +122,20 @@ void RobotApplication::begin() {
 }
 
 #if ROBOT_CALIBRATION
+bool RobotApplication::calibrationPlatformReady(uint32_t nowMs) const {
+    return calibrationActionsReady(
+        platformInitialized_, effectiveDriveHealth(nowMs)
+    );
+}
+
 void RobotApplication::processHostMessages(uint32_t nowMs) {
     if (!communication_.transmitIdle()) return;
+    const bool platformReady = calibrationPlatformReady(nowMs);
 
     PendingArmMove armMove = {};
     if (communication_.takeArmMove(armMove)) {
         if (!config::ArmEnabled ||
+            !platformReady ||
             safety_.state() != RobotState::Disarmed ||
             armMove.joint >= 4 || armMove.degrees > 180) {
             communication_.sendNack(
@@ -150,6 +160,7 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
     PendingJointReference reference = {};
     if (communication_.takeJointReference(reference)) {
         if (!config::ArmEnabled ||
+            !platformReady ||
             safety_.state() != RobotState::Disarmed) {
             communication_.sendNack(
                 reference.sequence,
@@ -185,6 +196,7 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
             ? config::CalibrationSpinLimitPercent
             : config::CalibrationWheelLimitMmS;
         if (!config::DriveEnabled ||
+            !platformReady ||
             safety_.state() != RobotState::Disarmed) {
             communication_.sendNack(
                 spin.sequence, MessageType::CalibrationDriveSpin,
@@ -225,7 +237,8 @@ void RobotApplication::processHostMessages(uint32_t nowMs) {
         const bool systemRead =
             request.type == MessageType::CalibrationReadSystem;
         if ((!systemRead &&
-             safety_.state() != RobotState::Disarmed) ||
+             (!platformReady ||
+              safety_.state() != RobotState::Disarmed)) ||
             !sendCalibrationReport(request, nowMs)) {
             communication_.sendNack(
                 request.sequence, request.type,
@@ -349,7 +362,8 @@ void RobotApplication::runDueTasks(uint32_t nowMs, uint32_t nowUs) {
         }
         if (config::ArmEnabled) {
 #if ROBOT_CALIBRATION
-            if (safety_.state() == RobotState::Disarmed)
+            if (calibrationPlatformReady(nowMs) &&
+                safety_.state() == RobotState::Disarmed)
                 arm_.calibrationTick(elapsedUs, runtime_);
 #else
             if (safety_.armed() && armMotionEnabled())
@@ -393,7 +407,7 @@ bool RobotApplication::hostTransmitSafe(uint32_t nowUs) const {
     // The host starts one fixed 30 Hz control frame per period. Wait until a
     // complete frame has arrived, then stop transmitting before the next
     // frame can begin. This prevents NeoSWSerial TX interrupt masking from
-    // corrupting the higher-priority control/E-stop receive lane.
+    // corrupting the higher-priority control/urgent-DISARM receive lane.
     if (!activeFrame_.valid) return false;
     const uint32_t sinceControlUs = nowUs - lastControlReceivedUs_;
     if (sinceControlUs < config::HostTransmitStartDelayUs ||
@@ -435,7 +449,8 @@ void RobotApplication::updateStatusPending(uint32_t nowMs) {
     if (safety_.state() != lastStatusState_ ||
         faults != lastStatusFaults_ ||
         warnings != lastStatusWarnings_ ||
-        safety_.linkAlive() != lastStatusLinkAlive_)
+        safety_.linkAlive() != lastStatusLinkAlive_ ||
+        safety_.readyToArm() != lastStatusReadyToArm_)
         statusPending_ = true;
 }
 
@@ -484,7 +499,9 @@ bool RobotApplication::sendCriticalStatus(uint32_t nowMs) {
     putU16(payload, offset, faults);
     putU16(payload, offset, warnings);
     payload[offset++] = lastProcessedControlSequence_;
-    payload[offset++] = static_cast<uint8_t>(safety_.linkAlive());
+    payload[offset++] =
+        (safety_.linkAlive() ? CriticalStatusLinkAlive : 0U) |
+        (safety_.readyToArm() ? CriticalStatusReadyToArm : 0U);
     if (!communication_.sendFrame(
             MessageType::CriticalStatus, transmitSequence_++,
             payload, offset
@@ -494,6 +511,7 @@ bool RobotApplication::sendCriticalStatus(uint32_t nowMs) {
     lastStatusFaults_ = faults;
     lastStatusWarnings_ = warnings;
     lastStatusLinkAlive_ = safety_.linkAlive();
+    lastStatusReadyToArm_ = safety_.readyToArm();
     return true;
 }
 

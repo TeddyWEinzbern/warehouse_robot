@@ -1,9 +1,9 @@
-# Protocol v3 and motor-board contract
+# Protocol v4 and motor-board contract
 
-Protocol v3 is intentionally split into a compact real-time lane and a typed
+Protocol v4 is intentionally split into a compact real-time lane and a typed
 command/reply lane. Production traffic contains 30 Hz control, a dedicated
-E-stop packet, HELLO, and compact critical status. Detailed reports exist only
-as on-demand calibration replies.
+urgent-DISARM packet, HELLO, and compact critical status. Detailed reports
+exist only as on-demand calibration replies.
 
 All multibyte integers in the generic lane are little-endian.
 
@@ -59,30 +59,29 @@ Each two-bit field in byte 6 uses:
 
 Byte 7 assigns bit 0 `PresetLeft`, bit 1 `PresetFront`, bit 2 `PresetRight`,
 bit 3 `PresetStow`, bit 4 `StartAssist`, and bit 5 `CancelAssist`. These are
-ordinary operator intents. None clears a fault, clears E-stop, or implies ARM.
+ordinary operator intents. None clears a fault or implies ARM.
 
 The host sends control at 30 Hz at both 9600 and 38400 baud. Firmware link
 freshness is based on accepted control packets, not raw serial activity.
 
-### Dedicated E-stop packet
+### Dedicated urgent-DISARM packet
 
-The raw E-stop packet is two bytes:
+The raw urgent-DISARM packet is two bytes:
 
 ```text
 byte 0    10ssssss    class 10 plus 6-bit sequence
 byte 1    CRC-8
 ```
 
-COBS plus the delimiter makes a four-byte wire frame. One valid packet latches
-E-stop. The normal host runtime sends three frames for each urgent attempt,
-then retries every 250 ms until a fresh critical-status message confirms
-`ESTOP`. The calibration tool, which has no periodic status stream, uses a
-three-frame fail-closed burst at startup and shutdown. Neither inserts an
-E-stop level into every control packet. Clearing E-stop is a separate typed
-command and never arms the robot.
+COBS plus the delimiter makes a four-byte wire frame. One valid packet requests
+immediate DISARM and the exact zero-output path; it does not create another
+latched state. The normal host runtime sends three frames for each urgent
+attempt, discards older ARM/clear-fault intent, keeps controls neutral, and
+waits for fresh status confirming the robot is no longer ARMED. The calibration
+tool uses the same three-frame fail-closed burst at startup and shutdown.
 
 Class prefixes `00` and `11` are not additional compact-frame classes. A raw
-packet beginning with the literal protocol version `0x03` is instead parsed
+packet beginning with the literal protocol version `0x04` is instead parsed
 as the generic lane below.
 
 ## Generic typed lane
@@ -90,7 +89,7 @@ as the generic lane below.
 Generic raw packets use:
 
 ```text
-version:u8 = 3
+version:u8 = 4
 message_type:u8
 sequence:u8
 payload_length:u8
@@ -100,10 +99,10 @@ crc8
 
 | Direction | Type | Value | Purpose |
 | --- | --- | ---: | --- |
-| Host → Uno | Hello | `0x01` | Start/verify a protocol-v3 session |
+| Host → Uno | Hello | `0x01` | Start/verify a protocol-v4 session |
 | Host → Uno | Arm | `0x03` | Request ARM through the complete safety gate |
 | Host → Uno | Disarm | `0x04` | Request immediate safe disarm |
-| Host → Uno | Clear E-stop | `0x05` | Clear a latched E-stop when neutral and otherwise eligible |
+| — | Reserved | `0x05` | Retired value; ignored and never reassigned |
 | Host → Uno | Clear fault | `0x06` | Clear eligible latched faults from normal Fault or unsafe Disarmed; does not ARM |
 | Host → Uno | Calibration arm move | `0x10` | Calibration-only guarded arm movement |
 | Host → Uno | Calibration joint reference | `0x11` | Calibration-only joint reference/update |
@@ -113,7 +112,7 @@ crc8
 | Host → Uno | Calibration arm read | `0x15` | Request one protected arm-state report |
 | Host → Uno | Calibration system read | `0x16` | Request the qualification-only stack-watermark report |
 | Uno → Host | Hello response | `0x80` | Protocol/build configuration |
-| Uno → Host | Critical status | `0x81` | Compact state, fault/warning, sequence, and link-alive status |
+| Uno → Host | Critical status | `0x81` | Compact state, fault/warning, sequence, link, and ARM-readiness status |
 | Uno → Host | Calibration report | `0x90` | Reply to an explicit calibration read/action |
 | Uno → Host | ACK | `0x91` | Typed command accepted |
 | Uno → Host | NACK | `0x92` | Typed command rejected with a reason |
@@ -123,14 +122,14 @@ ACK/NACK replies echo the request sequence so the host can match the
 outstanding operation. HELLO responses and critical status use the Uno's
 independent transmit sequence.
 
-ARM, DISARM, clear-E-stop, and clear-fault are distinct safety requests. They
-do not generate ACK/NACK traffic; the host confirms their effect only from a
-fresh critical-status message. ACK/NACK is reserved for calibration
-transactions in the `calibration` image, and no accepted command makes
-another safety transition implicit. The production image silently ignores
-message types `0x10` through `0x16`; it does not retain calibration pending
-state or emit calibration ACK/NACK replies. The calibration host verifies
-HELLO profile `7` before it sends any calibration command.
+ARM, DISARM, and clear-fault are distinct safety requests. They do not generate
+ACK/NACK traffic; the host confirms their effect only from a fresh
+critical-status message. ACK/NACK is reserved for calibration transactions in
+the `calibration` image, and no accepted command makes another safety
+transition implicit. The production image silently ignores message types
+`0x10` through `0x16`; it does not retain calibration pending state or emit
+calibration ACK/NACK replies. The calibration host verifies HELLO profile `7`
+before it sends any calibration command.
 
 ### Generic payload layouts
 
@@ -140,27 +139,30 @@ below is wire order; `i16`, `u16`, and `i32` fields are little-endian.
 | Message | Payload |
 | --- | --- |
 | Hello request | empty |
-| Arm / Disarm / Clear E-stop / Clear fault | empty |
+| Arm / Disarm / Clear fault | empty |
 | Calibration arm move | `joint:u8, degrees:u8` |
 | Calibration joint reference | `joint:u8, lower:u8, upper:u8, center_offset:i8, direction:i8` |
 | Calibration drive spin | `mode:u8, channel:u8, value:i16, duration_ms:u16` |
 | Calibration drive read | `page:u8`; `0` counts, `1` speeds |
 | Calibration sensor read / arm read / system read | empty |
 | Hello response | `profile:u8, arm_enabled:u8, drive_enabled:u8, sensor_enabled:u8, driver_mode:u8, arm_calibrated:u8, drive_calibrated:u8, baud_div_1200:u8` |
-| Critical status | `state:u8, faults:u16, warnings:u16, last_control_sequence:u8, link_alive:u8` |
+| Critical status | `state:u8, faults:u16, warnings:u16, last_control_sequence:u8, status_flags:u8` |
 | ACK | `accepted_type:u8` |
 | NACK | `rejected_type:u8, reason:u8` |
 
 The shipped `profile` values are `3` closed-loop `robot`, `6` open-loop
-`robot`, and `7` `calibration`. Enabled/calibrated/link fields are encoded as
-`0` or `1`. `driver_mode` is `0` for no concrete driver, `1` for open-loop,
-and `2` for closed-loop. `baud_div_1200` is `8` at 9600 baud and `32` at
-38400 baud.
+`robot`, and `7` `calibration`. Enabled/calibrated fields are encoded as `0` or
+`1`. `driver_mode` is `0` for no concrete driver, `1` for open-loop, and `2`
+for closed-loop. `baud_div_1200` is `8` at 9600 baud and `32` at 38400 baud.
 
-Critical `state` values are `0` Boot, `1` Disarmed, `2` Armed, `3` E-stop, and
-`4` Fault. Normal images select state `4` whenever a fault is latched. Explicit
-`_unsafe` images retain the same fault bits in telemetry but do not select
-state `4` from them. Fault bits are:
+Critical `state` values are exactly `0` Disarmed, `1` Armed, and `2` Fault.
+Normal images select state `2` whenever a fault is latched. Explicit `_unsafe`
+images retain the same fault bits in telemetry but do not select state `2`
+from them. `status_flags` bit 0 is `link_alive`; bit 1 is the
+firmware-authoritative `ready_to_arm` qualification. All other bits are zero.
+`ready_to_arm` requires Disarmed state, completed platform/profile/drive
+initialization, ready and healthy feedback, no latched fault, a live link, and
+500 ms of neutral control. Fault bits are:
 
 | Bit | Fault |
 | ---: | --- |
@@ -200,7 +202,7 @@ is the explicit stop request.
 HELLO establishes all of the following before the host treats a port as the
 robot link:
 
-- protocol version 3;
+- protocol version 4;
 - the selected `robot` or `calibration` personality;
 - selected driver control mode;
 - host-link baud;
@@ -218,15 +220,15 @@ repeated in every critical-status packet.
 In the normal `robot` image, critical status is transmitted:
 
 - periodically at 2 Hz at both supported baud rates; and
-- promptly after state, fault, warning, or link-alive changes.
+- promptly after state, fault, warning, link-alive, or READY changes.
 
-It is the only production periodic telemetry. Its recurring payload is limited to robot
-state, faults, warnings, the last accepted control sequence, and link-alive
-state. Together with the prior HELLO response, that is enough to render
-connection verification, status age, critical safety state, and the fixed
-enabled/calibrated summary. It does not contain wheel arrays, encoder traces,
-sonar distances, servo positions, scheduler counters, or mutable tuning
-parameters.
+It is the only production periodic telemetry. Its recurring payload is limited
+to robot state, faults, warnings, the last accepted control sequence, link
+state, and READY qualification. Together with the prior HELLO response, that is
+enough to render connection verification, status age, critical safety state,
+and the fixed enabled/calibrated summary. It does not contain wheel arrays,
+encoder traces, sonar distances, servo positions, scheduler counters, or
+mutable tuning parameters.
 
 The host treats status age and the control-link watchdog independently. A live
 browser is not proof of a live Arduino link, and arbitrary incoming bytes are
@@ -244,28 +246,30 @@ Uno's reverse-direction window.
 ## Calibration-only reports
 
 Calibration commands are accepted only by the `calibration` image, while
-DISARMED, and only for the corresponding enabled subsystem. The production
-image ignores those message types without replying. Every actuator request
-remains bounded by compiled limits.
+DISARMED, after platform and enabled-drive initialization, and only for the
+corresponding enabled subsystem. The explicit initialization gate replaces the
+retired startup state and prevents DISARMED from opening actuator commands too
+early. The production image ignores those message types without replying.
+Every actuator request remains bounded by compiled limits.
 
 - Arm movement and joint-reference commands use the protected arm path.
 - The first command for every servo must be raw 90 degrees; both host and
   firmware reject an arbitrary first attachment target.
 - Drive spins are channel-, magnitude-, and duration-limited and return to the
   exact zero command on completion, cancellation, or timeout.
-- E-stop or DISARM cancels pending calibration servo motion and forces the
-  exact motor zero path.
+- DISARM cancels pending calibration servo motion and forces the exact motor
+  zero path.
 - Drive/encoder data is returned only after an explicit drive-read request.
 - Sonar data is returned only after an explicit sensor-read request.
 - Arm state is returned only after an explicit arm-read request.
 - Minimum untouched stack and calibration-only driver diagnostics are returned
-  only after an explicit system-read request. This read is available in Boot,
-  DISARMED, E-stop, and Fault because it cannot command an actuator.
+  only after an explicit system-read request. This read is available in every
+  state and during driver initialization because it cannot command an actuator.
 - Exported values are reviewed and written into source defaults before the
   matching `*_CALIBRATED` flag is set.
 
 The normal `robot` image does not accept parameter writes, parameter snapshots,
-or detailed-report requests. Protocol v3 has no remote tuning transaction or
+or detailed-report requests. Protocol v4 has no remote tuning transaction or
 revisioned runtime-configuration API.
 
 ### Calibration stack-watermark instrument
@@ -312,8 +316,8 @@ at 2 Hz adds 28 bytes/s, for 358 bytes/s of normal steady-state wire traffic:
 | 9600 | 11.46 ms/frame | 37.3% | 62.7% |
 | 38400 | 2.87 ms/frame | 9.3% | 90.7% |
 
-HELLO, typed safety commands, and E-stop retries are short event traffic, not
-part of that recurring total. At 9600, the interval from one control-frame
+HELLO, typed safety commands, and urgent-DISARM bursts are short event traffic,
+not part of that recurring total. At 9600, the interval from one control-frame
 delimiter to the next frame's start is about 21.9 ms; at 38400 it is about
 30.5 ms.
 
@@ -322,25 +326,25 @@ a full 33.3 ms after that actual send. It never emits a catch-up burst into the
 firmware's reverse-direction window; missed slots are counted instead.
 
 Startup obeys the same physical-wire rule. The normal runtime lets its
-three-frame E-stop plus DISARM/HELLO prelude drain at the selected baud before
+three-frame urgent-DISARM plus HELLO prelude drain at the selected baud before
 the first control, then preserves the next 33.3 ms control-start deadline
 across the HELLO-to-connected transition. The calibration tool likewise drains
-its three E-stop frames before starting the timed neutral stream. This avoids
-mistaking fast RFCOMM/OS `write()` returns for bytes already transmitted by the
-HC-06 UART.
+its three urgent-DISARM frames before starting the timed neutral stream. This
+avoids mistaking fast RFCOMM/OS `write()` returns for bytes already transmitted
+by the HC-06 UART.
 
 The normal runtime also projects the 8N1 drain time of every accepted host
-write. Urgent E-stop bursts are still queued immediately, but a control that
-would have sat behind that event traffic is deferred until the projected UART
-queue is empty. Its following deadline is then anchored a full 33.3 ms later.
-Under this conservative software projection, an event lengthens one interval
-instead of intentionally compressing the next into the firmware response
-window. The logic-analyzer qualification described below remains required.
+write. Urgent-DISARM bursts are queued immediately, but a control that would
+have sat behind that event traffic is deferred until the projected UART queue
+is empty. Its following deadline is then anchored a full 33.3 ms later. Under
+this conservative software projection, an event lengthens one interval instead
+of intentionally compressing the next into the firmware response window. The
+logic-analyzer qualification described below remains required.
 
 The Uno link uses NeoSWSerial and explicit receive/transmit windows. Its
 software-UART transmitter still masks interrupts for each transmitted
 character, so a short frame is not equivalent to interrupt-free full duplex.
-Control and E-stop receive work has priority over periodic status.
+Control and urgent-DISARM receive work has priority over periodic status.
 
 The implementation pumps at most one HC-06 transmit byte per main-loop pass,
 and only when:
@@ -360,8 +364,8 @@ and only when:
 
 A queued status may therefore be deferred and repeated state changes
 coalesced rather than blocking the control path. A 14-byte status can span
-more than one permitted window at 9600; control and E-stop receive still take
-priority. Unbounded logging must never share the HC-06 UART.
+more than one permitted window at 9600; control and urgent-DISARM receive still
+take priority. Unbounded logging must never share the HC-06 UART.
 
 The Uno's chassis-ramp task and motor-target task both run every 10 ms.
 Encoder-increment requests remain every 20 ms and start 5 ms out of phase with
@@ -379,39 +383,40 @@ watchdog edge is a release blocker.
 ## Uno resource audit
 
 The v2 baseline was rebuilt from commit `ba4b8ad` with the same pinned
-PlatformIO/AVR toolchain. The v3 numbers below come from the current build
+PlatformIO/AVR toolchain. The v4 numbers below come from the current build
 matrix. “Static free” is 2048 bytes minus `.data` and `.bss`; it is not a
 measurement of live stack headroom.
 
 | Image | Flash | Static SRAM | Static free |
 | --- | ---: | ---: | ---: |
 | v2 closed-loop robot (`ba4b8ad`) | 31,668 B (98.2%) | 1,812 B (88.5%) | 236 B |
-| v3 `robot` | 28,180 B (87.4%) | 1,311 B (64.0%) | 737 B |
-| v3 `robot_unsafe` | 28,302 B (87.7%) | 1,312 B (64.1%) | 736 B |
-| v3 qualified robot + sonar | 30,292 B (93.9%) | 1,331 B (65.0%) | 717 B |
+| v4 `robot` | 28,150 B (87.3%) | 1,313 B (64.1%) | 735 B |
+| v4 `robot_unsafe` | 28,288 B (87.7%) | 1,314 B (64.2%) | 734 B |
+| v4 qualified robot + sonar | 30,262 B (93.8%) | 1,333 B (65.1%) | 715 B |
 | v2 calibration (`ba4b8ad`) | 31,844 B (98.7%) | 1,835 B (89.6%) | 213 B |
-| v3 `calibration` | 23,566 B (73.1%) | 1,463 B (71.4%) | 585 B |
-| v3 `calibration_unsafe` | 23,654 B (73.3%) | 1,464 B (71.5%) | 584 B |
+| v4 `calibration` | 23,610 B (73.2%) | 1,465 B (71.5%) | 583 B |
+| v4 `calibration_unsafe` | 23,702 B (73.5%) | 1,466 B (71.6%) | 582 B |
 
-The fair production comparison is v2 closed-loop against v3 qualified
-closed-loop: flash falls by 3,488 bytes (11.0%), static SRAM by 501 bytes
-(27.6%), and static free SRAM rises from 236 to 737 bytes. For calibration,
-flash falls by 8,278 bytes (26.0%) and static SRAM by 372 bytes (20.3%).
+The fair production comparison is v2 closed-loop against v4 qualified
+closed-loop: flash falls by 3,518 bytes (11.1%), static SRAM by 499 bytes
+(27.5%), and static free SRAM rises from 236 to 735 bytes. For calibration,
+flash falls by 8,234 bytes (25.9%) and static SRAM by 370 bytes (20.2%).
 
 The production-only pruning removes calibration command state/ACK handling
 and the unused periodic encoder-total path. At that measured step it reduced
 the worst-case sonar image from 31,746-byte/1,394-byte to
 30,076-byte/1,330-byte: 1,670 bytes of Flash and 64 bytes of SRAM recovered.
-Subsequent drive-health and warning hardening brings the current image to
-30,292-byte/1,331-byte. Calibration retains encoder-total queries and reports,
-plus the read-only driver initialization counters used to distinguish an
-electrically silent D0 input from rejected or missing motor-board replies.
+Subsequent drive-health, warning, and protocol-v4 safety hardening brings the
+current image to 30,262-byte/1,333-byte. Calibration retains encoder-total
+queries and reports, plus the read-only driver initialization counters used
+to distinguish an electrically silent D0 input from rejected or missing
+motor-board replies.
 
-The linked v3 matrix contains no application-visible `malloc`, `calloc`,
+The linked v4 matrix contains no application-visible `malloc`, `calloc`,
 `realloc`, `free`, or C++ allocator symbols. The 256-byte live watermark gate
 still applies because static free SRAM does not include worst-case call
 frames, interrupt nesting, or library stack use. The sonar-enabled production
-variant has 1,964 bytes of flash remaining; keep that build in CI and treat
+variant has 1,994 bytes of flash remaining; keep that build in CI and treat
 any material growth as a resource review trigger.
 
 ## Motor-board UART contract
@@ -424,7 +429,7 @@ The motor board is independent of the HC-06 host protocol:
 - `$MOTOR_4CH_READ:encoder_total!` requests calibration-only cumulative encoder
   counts. It is serialized through the same parser; production health and stall
   checks use the 20 ms increments.
-- DISARM, link loss, E-stop, disabled drive, and—in normal images—drive faults
+- DISARM, link loss, disabled drive, and—in normal images—drive faults
   converge on `$Car:0,0,0,0!`.
 - Startup sends `$MOTOR_4CH_SET:1!` to select the installed TT motors, then
   `$MOTOR_4CH_SET_ENCPDER_POLARITY:0!`, preserving the vendor command's
@@ -432,10 +437,10 @@ The motor board is independent of the HC-06 host protocol:
   vendor example, the first complete reply beginning
   `$MOTOR_4CH_Encoder_20ms:` proves that the board is present; parsing its four
   numeric fields separately determines whether feedback is ready.
-- The startup reply window is 150 ms. A timeout remains fail-closed in Boot,
-  repeats the zero-motor frame, and retries the complete initialization
-  sequence after 2 seconds. It does not require a reset or latch a
-  clear-before-retry initialization fault.
+- The startup reply window is 150 ms. A timeout leaves the public state
+  DISARMED with READY false, repeats the zero-motor frame, and retries the
+  complete initialization sequence after 2 seconds. It does not require a
+  reset or latch a clear-before-retry initialization fault.
 - Routine queries use a 30 ms reply window. The captured vendor-board samples
   completed in at most about 24.9 ms from the first request byte, so this
   setting leaves measured margin but is not a claimed hardware upper bound.
@@ -456,9 +461,10 @@ The motor board is independent of the HC-06 host protocol:
   `fault_state_unsafe`; encoder timeout, sign, and mismatch additionally set
   their specific `*_ignored` warnings. Timeout and malformed replies preserve
   the last valid readiness sample so an already-armed diagnostic run can
-  continue. E-stop still selects E-stop, link loss still DISARMs, startup still
-  requires the vendor reply, and the host still requires fault-free status for
-  a new ARM. Unsafe DISARMED status with active fault bits accepts CLEAR FAULT.
+  continue. Urgent DISARM and link loss still select DISARMED, startup still
+  requires the vendor reply, and the firmware READY gate still requires
+  fault-free status for a new ARM. Unsafe DISARMED status with active fault
+  bits accepts WebUI-originated CLEAR FAULT through the official host.
 
 The driver-board UART remains compiled and allocated in shipped Uno images.
 `ROBOT_DRIVE_ENABLED=0` prevents initialization, polling, and commands; it does

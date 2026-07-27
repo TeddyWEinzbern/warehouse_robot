@@ -7,9 +7,9 @@ namespace {
 constexpr uint8_t FastClassMask = 0xC0;
 constexpr uint8_t FastSequenceMask = 0x3F;
 constexpr uint8_t ControlClass = 0x40;
-constexpr uint8_t EStopClass = 0x80;
+constexpr uint8_t UrgentDisarmClass = 0x80;
 constexpr uint8_t ControlRawLength = 9;
-constexpr uint8_t EStopRawLength = 2;
+constexpr uint8_t UrgentDisarmRawLength = 2;
 constexpr uint8_t AllowedButtons = 0x3F;
 
 #if ROBOT_CALIBRATION
@@ -163,9 +163,6 @@ void CommunicationSubsystem::acceptGeneric(uint8_t length) {
         case MessageType::Disarm:
             if (payloadLength == 0) requests_.flags |= RequestDisarm;
             break;
-        case MessageType::ClearEStop:
-            if (payloadLength == 0) requests_.flags |= RequestClearEStop;
-            break;
         case MessageType::ClearFault:
             if (payloadLength == 0) requests_.flags |= RequestClearFault;
             break;
@@ -229,8 +226,9 @@ void CommunicationSubsystem::finishFrame(uint32_t nowMs) {
         if (length == ControlRawLength) acceptControl(raw_, nowMs);
         return;
     }
-    if (frameClass == EStopClass) {
-        if (length == EStopRawLength) requests_.flags |= RequestEStop;
+    if (frameClass == UrgentDisarmClass) {
+        if (length == UrgentDisarmRawLength)
+            requests_.flags |= RequestDisarm;
         return;
     }
     acceptGeneric(length);
@@ -308,10 +306,20 @@ const OperatorControlFrame &CommunicationSubsystem::latest() const {
 ControlRequests CommunicationSubsystem::takeRequests() {
     const ControlRequests result = requests_;
     requests_.flags = 0;
+#if ROBOT_CALIBRATION
+    if ((result.flags & RequestDisarm) != 0)
+        cancelCalibrationActions();
+#endif
     return result;
 }
 
 #if ROBOT_CALIBRATION
+void CommunicationSubsystem::cancelCalibrationActions() {
+    armMove_.valid = false;
+    jointReference_.valid = false;
+    driveCalibration_.valid = false;
+}
+
 bool CommunicationSubsystem::takeArmMove(PendingArmMove &command) {
     if (!armMove_.valid) return false;
     command = armMove_;

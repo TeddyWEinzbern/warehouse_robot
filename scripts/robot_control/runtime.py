@@ -1,4 +1,4 @@
-"""Fail-closed serial/gamepad runtime for compact protocol v3."""
+"""Fail-closed serial/gamepad runtime for compact protocol v4."""
 
 from __future__ import annotations
 
@@ -21,13 +21,16 @@ from .protocol import (
     ProtocolDecoder,
     decode_message_data,
     encode_control_frame,
-    encode_estop,
     encode_message,
+    encode_urgent_disarm,
 )
 from .transport import SerialConnectionError, open_port
 
 
-STATE_NAMES = ("BOOT", "DISARMED", "ARMED", "ESTOP", "FAULT")
+STATE_NAMES = ("DISARMED", "ARMED", "FAULT")
+STATE_DISARMED = 0
+STATE_ARMED = 1
+STATE_FAULT = 2
 DRIVER_MODE_NAMES = ("disabled", "open_loop", "closed_loop")
 PROFILE_NAMES = {
     3: "robot",
@@ -59,7 +62,6 @@ CONTROL_RATE_HZ = 30.0
 CRITICAL_STATUS_RATE_HZ = 2.0
 CRITICAL_STATUS_STALE_SECONDS = 1.5
 NEUTRAL_CONFIRM_SECONDS = 0.6
-ESTOP_RETRY_SECONDS = 0.25
 
 
 def _reschedule_control(
@@ -116,8 +118,9 @@ class RobotRuntime:
 
         self._stop = threading.Event()
         self._wake = threading.Event()
-        self._critical_estop = threading.Event()
+        self._urgent_disarm = threading.Event()
         self._serial_write_lock = threading.RLock()
+        self._safety_action_lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._commands: queue.PriorityQueue[RuntimeCommand] = queue.PriorityQueue(
             maxsize=32
@@ -144,12 +147,9 @@ class RobotRuntime:
         self._controller_state = "not_started"
         self._last_error = ""
         self._fatal_error = ""
-        self._host_estop_latched = True
-        self._awaiting_clear_estop = False
-        self._pending_immediate_action: MessageType | None = None
+        self._disarm_pending_confirmation = True
         self._pending_neutral_action: MessageType | None = None
         self._neutral_since: float | None = None
-        self._estop_retry_at = 0.0
         self._latest_control = ControlFrame(sequence=0)
         self._hello: dict[str, Any] = {}
         self._critical_status: dict[str, Any] = {}
@@ -160,7 +160,7 @@ class RobotRuntime:
         self._events: list[dict[str, Any]] = []
         self._host_stats = {
             "control_frames_sent": 0,
-            "estop_frames_sent": 0,
+            "urgent_disarm_frames_sent": 0,
             "frames_received": 0,
             "write_failures": 0,
             "reconnects": 0,
@@ -174,7 +174,7 @@ class RobotRuntime:
         self._control_send_times: list[float] = []
         self._last_control_sent_at: float | None = None
         self._previous_arm_button = False
-        self._previous_clear_estop_button = False
+        self._previous_disarm_button = False
         self._controller_retry_at = 0.0
         self._publish_snapshot()
 
@@ -193,7 +193,7 @@ class RobotRuntime:
     def stop(self, timeout: float = 3.0) -> None:
         deadline = time.monotonic() + max(0.0, timeout)
         self._stop.set()
-        self._critical_estop.set()
+        self._urgent_disarm.set()
         self._wake.set()
         remaining = max(0.0, deadline - time.monotonic())
         if self._serial_write_lock.acquire(timeout=remaining):
@@ -211,21 +211,36 @@ class RobotRuntime:
                 self._publish_snapshot()
 
     def submit(self, action: str, payload: dict[str, Any] | None = None) -> bool:
-        if action == "estop":
-            self._host_estop_latched = True
-            self._critical_estop.set()
-            self._wake.set()
+        """Submit a normal runtime/controller action.
+
+        Fault clearing is intentionally excluded; only the loopback WebUI
+        entry point may request it.
+        """
+        return self._submit(action, payload, allow_clear_fault=False)
+
+    def submit_webui(
+        self, action: str, payload: dict[str, Any] | None = None
+    ) -> bool:
+        """Submit an action from the official loopback WebUI boundary."""
+        return self._submit(action, payload, allow_clear_fault=True)
+
+    def _submit(
+        self,
+        action: str,
+        payload: dict[str, Any] | None,
+        *,
+        allow_clear_fault: bool,
+    ) -> bool:
+        if action == "disarm":
+            self._request_urgent_disarm()
             return True
-        if action not in {
-            "arm",
-            "disarm",
-            "clear_estop",
-            "clear_fault",
-        }:
+        allowed = {"arm"}
+        if allow_clear_fault:
+            allowed.add("clear_fault")
+        if action not in allowed:
             return False
-        priority = 1 if action == "disarm" else 5
         command = RuntimeCommand(
-            priority, next(self._command_order), action, payload or {}
+            5, next(self._command_order), action, payload or {}
         )
         with self._command_state_lock:
             if not self._connected:
@@ -236,6 +251,16 @@ class RobotRuntime:
                 return False
         self._wake.set()
         return True
+
+    def _request_urgent_disarm(self) -> None:
+        """Invalidate older intent and wake the queue-bypassing safety path."""
+        with self._safety_action_lock:
+            self._disarm_pending_confirmation = True
+            self._pending_neutral_action = None
+            with self._command_state_lock:
+                self._clear_commands_unlocked()
+            self._urgent_disarm.set()
+        self._wake.set()
 
     def snapshot_json(self) -> str:
         with self._snapshot_lock:
@@ -276,6 +301,14 @@ class RobotRuntime:
             and now - self._last_status_at <= CRITICAL_STATUS_STALE_SECONDS
         )
 
+    def _firmware_ready_to_arm(self, now: float) -> bool:
+        return (
+            self._status_fresh(now)
+            and self._critical_status.get("state") == STATE_DISARMED
+            and bool(self._critical_status.get("link_alive", False))
+            and bool(self._critical_status.get("ready_to_arm", False))
+        )
+
     def _build_allows_motion(self) -> bool:
         arm_enabled = bool(self._hello.get("arm_enabled", False))
         drive_enabled = bool(self._hello.get("drive_enabled", False))
@@ -305,6 +338,7 @@ class RobotRuntime:
         )
         driver_mode = self._hello.get("driver_mode")
         profile = self._hello.get("profile")
+        ready_to_arm = self._firmware_ready_to_arm(now)
         snapshot = {
             "connected": self._connected,
             "link_state": self._link_state,
@@ -317,23 +351,17 @@ class RobotRuntime:
             "status_fresh": status_fresh,
             "status_age_ms": status_age_ms,
             "controller_state": self._controller_state,
+            "ready_to_arm": ready_to_arm,
             "arm_available": (
                 self.use_gamepad
-                and status_fresh
-                and bool(self._critical_status.get("link_alive", False))
+                and ready_to_arm
                 and self._build_allows_motion()
+                and not self._disarm_pending_confirmation
             ),
-            "host_estop_latched": self._host_estop_latched,
-            "awaiting_clear_estop": self._awaiting_clear_estop,
+            "disarm_pending_confirmation": self._disarm_pending_confirmation,
             "pending_action": (
-                (
-                    self._pending_immediate_action
-                    or self._pending_neutral_action
-                ).name.lower()
-                if (
-                    self._pending_immediate_action is not None
-                    or self._pending_neutral_action is not None
-                )
+                self._pending_neutral_action.name.lower()
+                if self._pending_neutral_action is not None
                 else None
             ),
             "state_name": (
@@ -430,18 +458,19 @@ class RobotRuntime:
             encode_message(message_type, self._next_generic_sequence())
         )
 
-    def _send_estop(self) -> bool:
-        sent = self._write(encode_estop(self._next_fast_sequence()))
+    def _send_urgent_disarm(self) -> bool:
+        sent = self._write(
+            encode_urgent_disarm(self._next_fast_sequence())
+        )
         if sent:
-            self._host_stats["estop_frames_sent"] += 1
+            self._host_stats["urgent_disarm_frames_sent"] += 1
         return sent
 
-    def _send_estop_burst(self) -> bool:
+    def _send_urgent_disarm_burst(self) -> bool:
         """Send three idempotent frames so one dropped packet is harmless."""
         for _ in range(3):
-            if not self._send_estop():
+            if not self._send_urgent_disarm():
                 return False
-        self._estop_retry_at = self.clock() + ESTOP_RETRY_SECONDS
         return True
 
     def _open_connection(self, now: float) -> None:
@@ -459,12 +488,10 @@ class RobotRuntime:
         self._handshake_deadline = None
         self._bootstrap_control_at = None
         self._connected_at = None
-        self._host_estop_latched = True
-        self._awaiting_clear_estop = False
-        self._pending_immediate_action = None
+        self._disarm_pending_confirmation = True
         self._pending_neutral_action = None
         self._neutral_since = None
-        self._estop_retry_at = 0.0
+        self._urgent_disarm.clear()
         self._hello.clear()
         self._critical_status.clear()
         self._last_status_at = None
@@ -478,21 +505,18 @@ class RobotRuntime:
         self._link_state = "handshaking"
         self._stabilize_until = None
         self._handshake_deadline = now + self.handshake_timeout_seconds
-        if not self._send_estop_burst():
-            return
-        if not self._send_simple(MessageType.DISARM):
+        if not self._send_urgent_disarm_burst():
             return
         if not self._send_simple(MessageType.HELLO):
             return
-        # Do not queue the first 11-byte control behind the 26-byte safety /
-        # HELLO prelude. At 9600 baud that would make the following control
+        # Do not queue the first 11-byte control behind the safety/HELLO
+        # prelude. At 9600 baud that would make the following control
         # physically start only 11 bytes later even if Python write calls are
         # 33 ms apart. Wait a conservative full prelude wire time after the
         # final write so the first control starts with an empty HC-06 UART
         # queue.
         prelude_bytes = (
-            3 * len(encode_estop(0))
-            + len(encode_message(MessageType.DISARM, 0))
+            3 * len(encode_urgent_disarm(0))
             + len(encode_message(MessageType.HELLO, 0))
         )
         self._bootstrap_control_at = (
@@ -528,12 +552,10 @@ class RobotRuntime:
         self._handshake_deadline = None
         self._bootstrap_control_at = None
         self._connected_at = None
-        self._host_estop_latched = True
-        self._awaiting_clear_estop = False
-        self._pending_immediate_action = None
+        self._disarm_pending_confirmation = True
         self._pending_neutral_action = None
         self._neutral_since = None
-        self._estop_retry_at = 0.0
+        self._urgent_disarm.clear()
         self._hello.clear()
         self._critical_status.clear()
         self._last_status_at = None
@@ -670,25 +692,24 @@ class RobotRuntime:
                 key: value for key, value in decoded.items() if key != "kind"
             }
             self._last_status_at = now
-            if self._awaiting_clear_estop and state == 1:
-                self._awaiting_clear_estop = False
-                self._host_estop_latched = False
-                self._estop_retry_at = 0.0
+            if (
+                decoded.get("link_alive", False)
+                and state != STATE_ARMED
+                and self._disarm_pending_confirmation
+            ):
+                self._disarm_pending_confirmation = False
                 self._record_event(
                     "info",
-                    "Firmware confirmed E-stop clear; ARM remains manual",
+                    "Firmware confirmed a non-ARMED state",
                 )
             if not decoded.get("link_alive", False):
-                self._host_estop_latched = True
+                self._request_urgent_disarm()
         elif kind == "ack":
             self._record_event(
                 "info",
                 f"Firmware accepted message {decoded['acknowledged_type']:#04x}",
             )
         elif kind == "nack":
-            if decoded["rejected_type"] == int(MessageType.CLEAR_ESTOP):
-                self._awaiting_clear_estop = False
-                self._host_estop_latched = True
             self._record_event(
                 "error",
                 "Firmware rejected message "
@@ -716,20 +737,26 @@ class RobotRuntime:
         arm_pressed = bool(
             self._joystick.get_button(self._control_config.arm_button)
         )
-        clear_pressed = bool(
-            self._joystick.get_button(self._control_config.clear_estop_button)
+        disarm_pressed = bool(
+            self._joystick.get_button(self._control_config.disarm_button)
         )
         if arm_pressed and not self._previous_arm_button:
-            if self.submit("arm"):
+            if (
+                self._firmware_ready_to_arm(self.clock())
+                and not self._disarm_pending_confirmation
+                and self.submit("arm")
+            ):
                 self._record_event("info", "Controller Menu requested ARM")
             else:
                 self._record_event(
-                    "error", "Controller ARM request could not be queued"
+                    "error",
+                    "Controller ARM requires fresh firmware READY status",
                 )
-        if clear_pressed and not self._previous_clear_estop_button:
-            self._request_clear_estop()
+        if disarm_pressed and not self._previous_disarm_button:
+            self._request_urgent_disarm()
+            self._record_event("info", "Controller View requested DISARM")
         self._previous_arm_button = arm_pressed
-        self._previous_clear_estop_button = clear_pressed
+        self._previous_disarm_button = disarm_pressed
         return frame
 
     def _current_control(self) -> ControlFrame:
@@ -737,17 +764,13 @@ class RobotRuntime:
             frame = self._read_controller()
         except Exception as exc:
             self._controller_state = f"unavailable: {exc}"
-            self._host_estop_latched = True
-            self._critical_estop.set()
+            self._request_urgent_disarm()
             self._controller_retry_at = self.clock() + 1.0
             for attribute in ("_pygame", "_joystick"):
                 if hasattr(self, attribute):
                     delattr(self, attribute)
             frame = ControlFrame(sequence=self._fast_sequence)
-        if (
-            self._host_estop_latched
-            or self._pending_immediate_action == MessageType.DISARM
-        ):
+        if self._disarm_pending_confirmation:
             frame = ControlFrame(sequence=self._fast_sequence)
         return replace(frame, sequence=self._next_fast_sequence())
 
@@ -763,14 +786,21 @@ class RobotRuntime:
 
     def _send_control(self, now: float) -> float | None:
         frame = self._current_control()
-        self._latest_control = frame
-        if frame.neutral():
-            if self._neutral_since is None:
-                self._neutral_since = now
-        else:
-            self._neutral_since = None
-        if not self._write(encode_control_frame(frame)):
-            return None
+        # Controller loss/View can discover a DISARM only while reading this
+        # frame. Serialize the final urgent check with the control write so an
+        # already-known DISARM can never sit behind an 11-byte Control packet.
+        with self._safety_action_lock:
+            if self._urgent_disarm.is_set():
+                self._drain_commands()
+                return None
+            self._latest_control = frame
+            if frame.neutral():
+                if self._neutral_since is None:
+                    self._neutral_since = now
+            else:
+                self._neutral_since = None
+            if not self._write(encode_control_frame(frame)):
+                return None
         sent_at = self.clock()
         self._host_stats["control_frames_sent"] += 1
         if self._last_control_sent_at is not None:
@@ -785,27 +815,25 @@ class RobotRuntime:
             and sent_at - self._connected_at >= self.reconnect_reset_seconds
         ):
             self._connection_failures = 0
-        if self._pending_immediate_action is not None:
-            action = self._pending_immediate_action
-            self._pending_immediate_action = None
-            if not self._send_simple(action):
-                return sent_at
-        if (
-            self._pending_neutral_action is not None
-            and self._neutral_since is not None
-            and sent_at - self._neutral_since >= NEUTRAL_CONFIRM_SECONDS
-        ):
-            action = self._pending_neutral_action
-            self._pending_neutral_action = None
-            if not self._pending_action_still_safe(action, sent_at):
-                self._record_event(
-                    "error",
-                    f"Cancelled {action.name}: safety preconditions changed",
-                )
-                return sent_at
-            sent = self._send_simple(action)
-            if sent and action == MessageType.CLEAR_ESTOP:
-                self._awaiting_clear_estop = True
+        with self._safety_action_lock:
+            if (
+                self._pending_neutral_action is not None
+                and self._neutral_since is not None
+                and sent_at - self._neutral_since >= NEUTRAL_CONFIRM_SECONDS
+            ):
+                action = self._pending_neutral_action
+                self._pending_neutral_action = None
+                if (
+                    self._urgent_disarm.is_set()
+                    or self._disarm_pending_confirmation
+                    or not self._pending_action_still_safe(action, sent_at)
+                ):
+                    self._record_event(
+                        "error",
+                        f"Cancelled {action.name}: safety preconditions changed",
+                    )
+                    return sent_at
+                self._send_simple(action)
         return sent_at
 
     def _pending_action_still_safe(
@@ -821,33 +849,25 @@ class RobotRuntime:
             return (
                 self.use_gamepad
                 and self._build_allows_motion()
-                and state == 1
+                and state == STATE_DISARMED
                 and faults == 0
-                and not self._host_estop_latched
+                and bool(self._critical_status.get("ready_to_arm", False))
+                and not self._disarm_pending_confirmation
             )
-        if action == MessageType.CLEAR_ESTOP:
-            return state == 3 and self._host_estop_latched
         if action == MessageType.CLEAR_FAULT:
             warnings = int(self._critical_status.get("warnings", 0))
-            return state == 4 or (
-                state == 1
-                and faults != 0
-                and bool(warnings & FAULT_STATE_UNSAFE_WARNING)
+            return (
+                not self._disarm_pending_confirmation
+                and (
+                    state == STATE_FAULT
+                    or (
+                        state == STATE_DISARMED
+                        and faults != 0
+                        and bool(warnings & FAULT_STATE_UNSAFE_WARNING)
+                    )
+                )
             )
         return False
-
-    def _request_clear_estop(self) -> None:
-        now = self.clock()
-        state = self._critical_status.get("state") if self._status_fresh(now) else None
-        if not self._host_estop_latched or state != 3:
-            self._record_event(
-                "error",
-                "Clear E-stop requires a fresh firmware ESTOP state and a "
-                "latched host E-stop",
-            )
-            return
-        self._neutral_since = None
-        self._pending_neutral_action = MessageType.CLEAR_ESTOP
 
     def _process_command(self, command: RuntimeCommand) -> None:
         action = command.action
@@ -856,8 +876,7 @@ class RobotRuntime:
         state = self._critical_status.get("state") if status_fresh else None
         faults = int(self._critical_status.get("faults", 0)) if status_fresh else 0
         if action == "disarm":
-            self._pending_neutral_action = None
-            self._pending_immediate_action = MessageType.DISARM
+            self._request_urgent_disarm()
         elif action == "arm":
             if not self.use_gamepad:
                 self._record_event(
@@ -869,19 +888,23 @@ class RobotRuntime:
                     "ARM is locked until every enabled motion function is "
                     "calibrated",
                 )
-            elif not status_fresh or state != 1 or faults:
+            elif (
+                not status_fresh
+                or state != STATE_DISARMED
+                or faults
+                or not self._critical_status.get("ready_to_arm", False)
+            ):
                 self._record_event(
                     "error",
-                    "ARM requires fresh, fault-free DISARMED firmware status",
+                    "ARM requires fresh firmware READY status",
                 )
-            elif self._host_estop_latched:
+            elif self._disarm_pending_confirmation:
                 self._record_event(
-                    "error", "Clear the host and firmware E-stop before ARM"
+                    "error",
+                    "ARM is inhibited until firmware confirms DISARM",
                 )
             else:
                 self._pending_neutral_action = MessageType.ARM
-        elif action == "clear_estop":
-            self._request_clear_estop()
         elif action == "clear_fault":
             warnings = (
                 int(self._critical_status.get("warnings", 0))
@@ -889,11 +912,15 @@ class RobotRuntime:
                 else 0
             )
             unsafe_disarmed_fault = (
-                state == 1
+                state == STATE_DISARMED
                 and faults != 0
                 and bool(warnings & FAULT_STATE_UNSAFE_WARNING)
             )
-            if status_fresh and (state == 4 or unsafe_disarmed_fault):
+            if (
+                status_fresh
+                and not self._disarm_pending_confirmation
+                and (state == STATE_FAULT or unsafe_disarmed_fault)
+            ):
                 self._pending_neutral_action = MessageType.CLEAR_FAULT
             else:
                 self._record_event(
@@ -905,19 +932,15 @@ class RobotRuntime:
             self._record_event("error", f"Unknown runtime action: {action}")
 
     def _drain_commands(self) -> None:
-        if self._critical_estop.is_set():
-            self._critical_estop.clear()
-            self._host_estop_latched = True
-            self._awaiting_clear_estop = False
-            self._pending_immediate_action = None
+        if self._urgent_disarm.is_set():
+            self._urgent_disarm.clear()
+            self._disarm_pending_confirmation = True
             self._pending_neutral_action = None
-            # E-stop invalidates every older UI/controller intent, including
-            # a queued clear request. A clear submitted after this point is a
-            # new, explicit operator action and will be requalified normally.
+            # Urgent DISARM invalidates every older UI/controller intent.
             with self._command_state_lock:
                 self._clear_commands_unlocked()
             if self._serial is not None:
-                self._send_estop_burst()
+                self._send_urgent_disarm_burst()
                 if self._serial is None:
                     return
         for _ in range(16):
@@ -929,19 +952,6 @@ class RobotRuntime:
             if self._serial is None:
                 break
 
-    def _retry_estop_if_needed(self, now: float) -> None:
-        if (
-            self._connected
-            and self._host_estop_latched
-            and not self._awaiting_clear_estop
-            and now >= self._estop_retry_at
-            and (
-                not self._status_fresh(now)
-                or self._critical_status.get("state") != 3
-            )
-        ):
-            self._send_estop_burst()
-
     def _best_effort_shutdown(self) -> None:
         with self._serial_write_lock:
             if self._serial is None:
@@ -949,13 +959,10 @@ class RobotRuntime:
             try:
                 for _ in range(3):
                     self._serial.write(
-                        encode_estop(self._next_fast_sequence())
+                        encode_urgent_disarm(
+                            self._next_fast_sequence()
+                        )
                     )
-                self._serial.write(
-                    encode_message(
-                        MessageType.DISARM, self._next_generic_sequence()
-                    )
-                )
             except Exception:
                 pass
             try:
@@ -1017,7 +1024,20 @@ class RobotRuntime:
 
             if self._serial is not None:
                 self._drain_commands()
-            self._retry_estop_if_needed(now)
+            if (
+                self._connected
+                and self._connected_at is not None
+                and now - self._connected_at > CRITICAL_STATUS_STALE_SECONDS
+                and not self._status_fresh(now)
+            ):
+                # Handle heartbeat loss before any Control write in this
+                # iteration. Urgent DISARM must be the next queued wire frame.
+                self._request_urgent_disarm()
+                self._drain_commands()
+                if self._serial is not None:
+                    self._fail_connection(
+                        "critical status heartbeat became stale", now
+                    )
             if (
                 self._connected
                 and now >= self._control_ready_at(control_deadline)
@@ -1032,20 +1052,6 @@ class RobotRuntime:
                         lateness * 1000.0,
                     )
                     self._host_stats["missed_control_deadlines"] += missed
-
-            if (
-                self._connected
-                and self._connected_at is not None
-                and now - self._connected_at > CRITICAL_STATUS_STALE_SECONDS
-                and not self._status_fresh(now)
-            ):
-                self._host_estop_latched = True
-                self._awaiting_clear_estop = False
-                self._send_estop_burst()
-                if self._serial is not None:
-                    self._fail_connection(
-                        "critical status heartbeat became stale", now
-                    )
 
             self._publish_snapshot()
             if self._link_state == "fatal":

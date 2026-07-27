@@ -110,9 +110,9 @@ h2 { font-size: 1.3rem; letter-spacing: -.025em; }
 .button:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
 .button:disabled { opacity: .35; cursor: not-allowed; }
 .button.arm { background: var(--green); color: #10200c; border-color: var(--green); }
-.button.estop { background: var(--red); border-color: var(--red); color: #180606; font-weight: 850; }
+.button.disarm { background: var(--red); border-color: var(--red); color: #180606; font-weight: 850; }
 .button.arm:hover:not(:disabled) { color: #20370f; border-color: var(--green); }
-.button.estop:hover:not(:disabled) { color: #450d0d; border-color: var(--red); }
+.button.disarm:hover:not(:disabled) { color: #450d0d; border-color: var(--red); }
 .dashboard-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
 .span-6 { grid-column: span 6; }
 .span-12 { grid-column: span 12; }

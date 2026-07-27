@@ -8,8 +8,9 @@ int absolute(int value) { return value < 0 ? -value : value; }
 }
 
 SafetySupervisor::SafetySupervisor()
-    : state_(RobotState::Boot), faults_(0), neutralSinceMs_(0), neutralTracking_(false),
-      linkAlive_(false), immediateStop_(true), clearFaultAccepted_(false) {}
+    : state_(RobotState::Disarmed), faults_(0), neutralSinceMs_(0),
+      neutralTracking_(false), linkAlive_(false), readyToArm_(false),
+      immediateStop_(true), clearFaultAccepted_(false) {}
 
 bool SafetySupervisor::neutral(const OperatorControlFrame &frame) {
     return frame.valid && absolute(frame.forward) <= 30 && absolute(frame.turn) <= 30 &&
@@ -20,9 +21,10 @@ bool SafetySupervisor::neutral(const OperatorControlFrame &frame) {
 
 void SafetySupervisor::transition(RobotState next) {
     if (state_ == next) return;
-    if (state_ == RobotState::Armed || next == RobotState::EStop || next == RobotState::Fault)
+    if (state_ == RobotState::Armed || next == RobotState::Fault)
         immediateStop_ = true;
     state_ = next;
+    if (next != RobotState::Disarmed) readyToArm_ = false;
 }
 
 void SafetySupervisor::update(
@@ -43,14 +45,9 @@ void SafetySupervisor::update(
         if (!config::FaultStateUnsafe)
             transition(RobotState::Fault);
     }
-    const bool eStopRequested = (requests.flags & RequestEStop) != 0;
     const bool disarmRequested = (requests.flags & RequestDisarm) != 0;
-    if (eStopRequested) transition(RobotState::EStop);
 
-    if (state_ == RobotState::Boot && platformInitialized && drive.initialized)
-        transition(RobotState::Disarmed);
-
-    if (!eStopRequested && disarmRequested) {
+    if (disarmRequested) {
         // DISARM is dominant over every request that could relax a safety
         // state. It also requests an immediate stop while already DISARMED,
         // which cancels bounded calibration motion.
@@ -60,38 +57,41 @@ void SafetySupervisor::update(
     }
     if (state_ == RobotState::Armed && !linkAlive_) transition(RobotState::Disarmed);
 
-    if (!eStopRequested && !disarmRequested &&
-        state_ == RobotState::Disarmed &&
-        (requests.flags & RequestArm) != 0 &&
-        profileCanArm && drive.feedbackHealthy && linkAlive_ && neutralQualified)
-        transition(RobotState::Armed);
-
-    if (!eStopRequested && !disarmRequested &&
-        state_ == RobotState::EStop &&
-        (requests.flags & RequestClearEStop) != 0 &&
-        neutralQualified) {
-        if (faults_ != 0 && !config::FaultStateUnsafe)
-            transition(RobotState::Fault);
-        else
-            transition(
-                platformInitialized && drive.initialized
-                    ? RobotState::Disarmed
-                    : RobotState::Boot
-            );
-    }
-
     const bool clearableFaultState =
         state_ == RobotState::Fault ||
         (config::FaultStateUnsafe &&
          state_ == RobotState::Disarmed && faults_ != 0);
-    if (!eStopRequested && !disarmRequested &&
+    const bool clearFaultRequested =
+        (requests.flags & RequestClearFault) != 0;
+    const bool feedbackRecovered =
+        drive.feedbackHealthy &&
+        (drive.warnings & WarningEncoderTimeoutIgnored) == 0;
+    if (!disarmRequested &&
         clearableFaultState &&
-        (requests.flags & RequestClearFault) != 0 &&
-        drive.feedbackHealthy && neutralQualified) {
+        clearFaultRequested &&
+        feedbackRecovered && neutralQualified) {
         faults_ = 0;
         clearFaultAccepted_ = true;
         transition(RobotState::Disarmed);
     }
+
+    readyToArm_ =
+        state_ == RobotState::Disarmed &&
+        platformInitialized &&
+        profileCanArm &&
+        drive.initialized &&
+        drive.feedbackReady &&
+        drive.feedbackHealthy &&
+        faults_ == 0 &&
+        linkAlive_ &&
+        neutralQualified;
+
+    // Clearing a fault always ends in DISARMED, even if ARM arrived in the
+    // same batch. DISARM likewise dominates both state-relaxing requests.
+    if (!disarmRequested && !clearFaultRequested &&
+        (requests.flags & RequestArm) != 0 &&
+        readyToArm_)
+        transition(RobotState::Armed);
 }
 
 DriveIntent SafetySupervisor::arbitrate(
@@ -116,6 +116,7 @@ DriveIntent SafetySupervisor::arbitrate(
 
 void SafetySupervisor::latchFault(uint16_t fault) {
     faults_ |= fault;
+    readyToArm_ = false;
     if (!config::FaultStateUnsafe)
         transition(RobotState::Fault);
 }
@@ -124,7 +125,7 @@ bool SafetySupervisor::takeClearFaultAccepted() { const bool value = clearFaultA
 RobotState SafetySupervisor::state() const { return state_; }
 bool SafetySupervisor::armed() const { return state_ == RobotState::Armed; }
 bool SafetySupervisor::linkAlive() const { return linkAlive_; }
-bool SafetySupervisor::emergencyStopped() const { return state_ == RobotState::EStop; }
+bool SafetySupervisor::readyToArm() const { return readyToArm_; }
 uint16_t SafetySupervisor::faults() const { return faults_; }
 
 } // namespace robot

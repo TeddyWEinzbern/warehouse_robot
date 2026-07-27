@@ -25,8 +25,8 @@ from .protocol import (
     encode_cal_joint_reference,
     encode_cal_read_drive,
     encode_control_frame,
-    encode_estop,
     encode_message,
+    encode_urgent_disarm,
 )
 
 JOINT_NAMES = ("base", "shoulder", "elbow", "gripper")
@@ -45,18 +45,17 @@ STRESS_MAX_SECONDS = 60.0
 NACK_REASONS = {
     1: "malformed frame",
     2: "unsupported command",
-    3: "invalid state: firmware must be the `calibration` build, DISARMED,"
-       " and (for motor spins) the motor board must be connected and powered",
+    3: "invalid state: firmware must be the initialized `calibration` build, "
+       "DISARMED, and (for motor spins) the motor board must be connected "
+       "and powered",
     4: "validation failed: shoulder/elbow coupling guard, or a value/duration"
        " is outside the calibration limits",
 }
 
 FIRMWARE_STATE_NAMES = {
-    0: "BOOT",
-    1: "DISARMED",
-    2: "ARMED",
-    3: "ESTOP",
-    4: "FAULT",
+    0: "DISARMED",
+    1: "ARMED",
+    2: "FAULT",
 }
 
 DRIVER_INIT_STAGE_NAMES = {
@@ -113,7 +112,7 @@ session commands:
                    marks, and fold estimate
   export           print the BuildConfig.h block from the recorded marks
   help             show this text
-  q                quit (latches E-stop; servos hold their last position)"""
+  q                quit (urgent DISARM; servos hold their last position)"""
 
 MARK_NAMES = ("lower", "upper", "center", "open", "closed")
 
@@ -200,27 +199,23 @@ class CalibrationSession:
     # -- transport helpers --------------------------------------------------
 
     def start(self) -> None:
-        """Stabilize the HC-06 link and recover a prior fail-closed exit."""
+        """Stabilize the HC-06 link and begin from urgent DISARM."""
         self.sleep(2.0)
         queued_bytes = 0
         for _ in range(3):
-            packet = encode_estop(self._next_fast_sequence())
+            packet = encode_urgent_disarm(self._next_fast_sequence())
             self.link.write(packet)
             queued_bytes += len(packet)
         # RFCOMM writes can return after only buffering bytes. Let the HC-06
-        # drain the complete E-stop burst before the first timed control so
+        # drain the complete DISARM burst before the first timed control so
         # the next control cannot become a short-interval queued frame.
         self.sleep(queued_bytes * 10.0 / self.baud)
-        # Verify the firmware personality while it is still fail-closed.
+        # Verify the firmware personality while motion remains disabled.
         # A mistaken connection to the production image must never receive
-        # control traffic or CLEAR_ESTOP from the calibration client.
+        # calibration control traffic.
         self._send(MessageType.HELLO)
         self._await_hello()
         self._send_neutral_stream(STARTUP_NEUTRAL_SECONDS)
-        # CLEAR_ESTOP returns a fault-free calibration image to DISARMED.
-        # Do not queue DISARM beside it: firmware intentionally gives DISARM
-        # dominance within one receive batch, which would suppress the clear.
-        self._send(MessageType.CLEAR_ESTOP)
 
     def _next_sequence(self) -> int:
         self.sequence = (self.sequence + 1) % 256
@@ -240,10 +235,9 @@ class CalibrationSession:
         """Best-effort fail-closed stop before the serial link is released."""
         try:
             for _ in range(3):
-                self.link.write(encode_estop(self._next_fast_sequence()))
-            self.link.write(
-                encode_message(MessageType.DISARM, self._next_sequence())
-            )
+                self.link.write(
+                    encode_urgent_disarm(self._next_fast_sequence())
+                )
             flush = getattr(self.link, "flush", None)
             if callable(flush):
                 flush()
@@ -291,7 +285,7 @@ class CalibrationSession:
                 return
             self.sleep(0.01)
         raise CalibrationError(
-            "timed out waiting for the protocol-v3 HELLO_RESPONSE"
+            "timed out waiting for the protocol-v4 HELLO_RESPONSE"
         )
 
     def _send_neutral_stream(
@@ -863,7 +857,7 @@ class CalibrationSession:
         state = system.get("state")
         if (
             self.hello.get("arm_enabled", True)
-            and (state is None or state == 1)
+            and (state is None or state == 0)
         ):
             sequence = self._send(MessageType.CAL_READ_ARM)
             self._await_reply(
@@ -1046,7 +1040,7 @@ def run_session(link: Any, *, out: Callable[[str], None] = print) -> int:
             out(f"error: {error}")
             return 2
         out(
-            "protocol-v3 calibration firmware verified;"
+            "protocol-v4 calibration firmware verified;"
             " type `help` for commands"
         )
         while True:

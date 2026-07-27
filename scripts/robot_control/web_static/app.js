@@ -21,7 +21,7 @@ function setAction(button, label, action, enabled) {
 }
 
 function bindControls() {
-  for (const button of [$("primary-action"), $("emergency-action")]) {
+  for (const button of [$("primary-action"), $("disarm-action")]) {
     button.addEventListener("click", async () => {
       if (!button.dataset.action) return;
       try {
@@ -90,7 +90,7 @@ function render(data) {
   $("freshness-tag").textContent = fresh ? "FRESH" : "STALE";
   $("freshness-tag").classList.toggle("danger", !fresh);
   $("robot-state").textContent = state;
-  $("host-estop").textContent = data.host_estop_latched ? "LATCHED" : "CLEAR";
+  $("arm-readiness").textContent = data.ready_to_arm ? "READY" : "NOT READY";
 
   $("bluetooth-module").textContent = data.bluetooth_module || "HC-06";
   $("serial-device").textContent = data.device || "—";
@@ -122,34 +122,22 @@ function render(data) {
 
   const primary = $("primary-action");
   if (state === "ARMED") {
-    setAction(primary, "Disarm", "disarm", connected && fresh);
+    setAction(primary, "ARMED", "", false);
   } else if (
     state === "FAULT"
     || (state === "DISARMED" && data.fault_state_unsafe && (data.faults || 0))
   ) {
-    setAction(primary, "Clear fault", "clear_fault", connected && fresh);
+    setAction(primary, "CLEAR FAULT", "clear_fault", connected && fresh);
   } else {
     const canArm = state === "DISARMED"
       && connected
       && fresh
       && data.arm_available
-      && !data.host_estop_latched
-      && !(data.faults || 0);
-    setAction(primary, "Arm", "arm", canArm);
+      && data.ready_to_arm;
+    setAction(primary, "ARM", "arm", canArm);
   }
 
-  const emergency = $("emergency-action");
-  const canClearEstop = state === "ESTOP"
-    && connected
-    && fresh
-    && data.host_estop_latched;
-  if (canClearEstop) {
-    setAction(emergency, "Clear E-stop", "clear_estop", true);
-    emergency.classList.remove("estop");
-  } else {
-    setAction(emergency, "E-stop", "estop", true);
-    emergency.classList.add("estop");
-  }
+  setAction($("disarm-action"), "DISARM", "disarm", connected);
 
   const fatal = $("fatal-error");
   fatal.hidden = !data.fatal_error;

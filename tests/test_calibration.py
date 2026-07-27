@@ -1,4 +1,4 @@
-"""Unit tests for the protocol-v3 interactive calibration session."""
+"""Unit tests for the protocol-v4 interactive calibration session."""
 
 from __future__ import annotations
 
@@ -238,7 +238,7 @@ class OnDemandReportTests(unittest.TestCase):
         link = FakeLink()
         link.queue_reply(
             system_report(
-                1, 400, state=1, drive_flags=0x07,
+                1, 400, state=0, drive_flags=0x07,
                 init_stage=6, rx_bytes=64, complete_frames=2,
                 increment_frames=1, ack_mask=0x03,
             )
@@ -253,7 +253,7 @@ class OnDemandReportTests(unittest.TestCase):
         self.assertIn("91", output[-1])
         self.assertIn("reported", output[-1])
 
-    def test_status_still_shows_local_records_when_arm_is_disabled(self):
+    def test_status_still_shows_local_records_before_driver_is_ready(self):
         link = FakeLink()
         link.queue_reply(
             system_report(
@@ -269,7 +269,7 @@ class OnDemandReportTests(unittest.TestCase):
             decode_message(link.written[0]).message_type,
             MessageType.CAL_READ_SYSTEM,
         )
-        self.assertIn("firmware state: BOOT", output[-1])
+        self.assertIn("firmware state: DISARMED", output[-1])
         self.assertIn("stage=retry_wait", output[-1])
         self.assertIn("motor map: ch0->fr+", output[-1])
 
@@ -318,7 +318,7 @@ class OnDemandReportTests(unittest.TestCase):
         link = FakeLink()
         link.queue_reply(
             system_report(
-                1, 300, state=4, drive_flags=0x03,
+                1, 300, state=2, drive_flags=0x03,
                 drive_faults=0x0004, drive_warnings=0x003C,
                 init_stage=6, rx_bytes=255,
                 complete_frames=9, increment_frames=7, ack_mask=0x01,
@@ -361,7 +361,7 @@ class OnDemandReportTests(unittest.TestCase):
 
 
 class MotorCommandTests(unittest.TestCase):
-    def test_open_and_closed_loop_spins_use_v3_calibration_command(self):
+    def test_open_and_closed_loop_spins_use_v4_calibration_command(self):
         link = FakeLink()
         session, output = make_session(link)
         session.handle_line("m0 30 2")
@@ -381,24 +381,24 @@ class MotorCommandTests(unittest.TestCase):
         self.assertEqual(link.written, [])
         self.assertTrue(all(line.startswith("error:") for line in output))
 
-    def test_session_shutdown_sends_fail_closed_estop_burst(self):
+    def test_session_shutdown_sends_urgent_disarm_burst(self):
         link = FakeLink()
         session, _ = make_session(link)
         session.shutdown()
         self.assertEqual(
             [decode_message(packet).message_type for packet in link.written],
-            [MessageType.ESTOP_ASSERT] * 3 + [MessageType.DISARM],
+            [MessageType.URGENT_DISARM] * 3,
         )
         self.assertTrue(link.flushed)
 
-    def test_start_recovers_prior_estop_with_neutral_stream_and_verifies_hello(self):
+    def test_start_disarms_with_neutral_stream_and_verifies_hello(self):
         link = FakeLink()
         session, _ = make_session(link)
         session.start()
         messages = [decode_message(packet) for packet in link.written]
         self.assertEqual(
             [message.message_type for message in messages[:3]],
-            [MessageType.ESTOP_ASSERT] * 3,
+            [MessageType.URGENT_DISARM] * 3,
         )
         controls = [
             message
@@ -408,9 +408,6 @@ class MotorCommandTests(unittest.TestCase):
         self.assertGreaterEqual(len(controls), 22)
         self.assertEqual(
             messages[3].message_type, MessageType.HELLO
-        )
-        self.assertEqual(
-            messages[-1].message_type, MessageType.CLEAR_ESTOP
         )
         self.assertNotIn(
             MessageType.DISARM,
@@ -443,10 +440,10 @@ class MotorCommandTests(unittest.TestCase):
                 decode_message(packet).message_type
                 for packet in link.written
             ],
-            [MessageType.ESTOP_ASSERT] * 3 + [MessageType.HELLO],
+            [MessageType.URGENT_DISARM] * 3 + [MessageType.HELLO],
         )
 
-    def test_start_drains_estop_burst_before_timed_control_stream(self):
+    def test_start_drains_disarm_burst_before_timed_control_stream(self):
         timeline = ManualClock()
 
         class TimedLink(FakeLink):

@@ -28,7 +28,7 @@ class RobotControlConfig:
     gripper_close_button: int = 1  # B
     cancel_assist_button: int = 2  # X
     start_assist_button: int = 3  # Y
-    clear_estop_button: int = 6  # View
+    disarm_button: int = 6  # View
     arm_button: int = 7  # Menu
 
 

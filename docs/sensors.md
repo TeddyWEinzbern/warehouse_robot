@@ -113,14 +113,14 @@ levels, and all connected echoes have been checked.
 1. Build and flash `calibration` with `ROBOT_SENSOR_ENABLED=1`, then start
    `warehouse-robot calibrate --port ... --baud 9600`.
 2. Use the calibration sensor-read command shown by `help`. Each invocation
-   requests one on-demand protocol-v3 report; there is no background sensor
+   requests one on-demand protocol-v4 report; there is no background sensor
    panel.
 3. Hold a large flat object about 300 mm in front of one sensor. Its reading
    should be near 300 mm and valid. A configured-but-uninstalled echo is a
    wiring/configuration error, not an expected invalid reading.
 4. Measure from the sensor face with a ruler. A consistent offset must be
    handled by physical placement or a reviewed code change; there is no
-   offset parameter in protocol v3.
+   offset parameter in protocol v4.
 5. Repeat at several distances and for every installed sensor. Only after all
    readings and stale/invalid behavior are correct should the sensor flag be
    enabled in the normal `robot` image.

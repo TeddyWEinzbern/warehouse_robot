@@ -97,24 +97,26 @@ warehouse-robot calibrate --port /dev/cu.HC-06 --baud 9600
 Notes:
 
 - Opening an HC-06 RFCOMM port does **not** reset the Uno. The tool waits for
-  the serial link to settle, sends E-stop, waits for that burst to drain at
-  the selected HC-06 baud, supplies 0.7 s of neutral 30 Hz control, clears a
-  prior E-stop back to the fail-closed DISARMED state, and verifies a
-  protocol-v3 `calibration` HELLO before showing the prompt.
+  the serial link to settle, sends three urgent-DISARM frames, waits for that
+  burst to drain at the selected HC-06 baud, verifies a protocol-v4
+  `calibration` HELLO, and supplies 0.7 s of neutral 30 Hz control before
+  showing the prompt.
 - After power-up all servos are limp (the firmware never moves them on its
   own); the arm sags under gravity. Hold it or rest it on a support.
 - The **first** command sent to each joint attaches it at the raw 90° anchor;
   both host and firmware reject any other first target. Hold and align the
   joint before sending `90`. Every later command slews at 60°/s.
 - Type `help` any time for the full command list; `q` quits.
-- Protocol-v3 calibration traffic is request/reply. Encoder and sensor reports
+- Protocol-v4 calibration traffic is request/reply. Encoder and sensor reports
   are returned only when the tool explicitly asks for them; there is no
   background detailed telemetry stream.
-- If the motor board is absent or slow at startup, the firmware stays in Boot
-  and continuously commands zero motor output. It waits up to 150 ms for the
-  vendor-prefixed encoder reply, then retries the complete board
-  initialization every 2 seconds. Reconnect the board and wait for the next
-  retry; resetting the Uno or clearing a fault is not required.
+- If the motor board is absent or slow at startup, the externally reported
+  state remains DISARMED but initialization readiness stays false. Motor output
+  remains zero and actuator calibration commands are rejected until the board
+  is initialized. The firmware waits up to 150 ms for the vendor-prefixed
+  encoder reply, then retries the complete initialization every 2 seconds.
+  Reconnect the board and wait for the next retry; resetting the Uno or
+  clearing a fault is not required.
 
 ## Chapter 2 — Calibrate the arm
 
@@ -229,7 +231,7 @@ For each board channel 0, 1, 2, 3:
 
 ### 3.2 Which encoder is which wheel, and which way counts up
 
-1. Type `counts`. Each invocation requests two protocol-v3 drive pages: raw
+1. Type `counts`. Each invocation requests two protocol-v4 drive pages: raw
    increment/total values indexed by **motor-board channel**, then measured
    speed indexed by compiled logical wheel (`fl/fr/rl/rr`). Before write-back,
    use the raw board-channel table to discover encoder wiring; the logical
@@ -359,7 +361,7 @@ stack entry; it is a conservative lower bound after
 the listed loads is diagnostic only.
 Stack PASS also does not qualify UART collisions or servo jitter; capture those
 with a logic analyzer as described in
-[the protocol scheduling section](protocol-v3.md#scheduling-and-hc-06-coexistence).
+[the protocol scheduling section](protocol-v4.md#scheduling-and-hc-06-coexistence).
 
 ## Chapter 5 — Mark calibration complete
 
@@ -399,8 +401,8 @@ send ClearFault before ARMing again.
 | `blocked: shoulder/elbow coupling guard...` | Protection, not a fault. Back off, or move the other joint first (chapter 2.3) |
 | Guard behaves backwards (blocks obviously-safe poses / allows deep folds) | j1/j2 not yet synced, or a wrong `dir`. Mark center + set dir for both, watch for `synced j1`/`synced j2`, re-test the direction if it persists |
 | `invalid state` or `disabled` on `j`/`m`/`v` commands | Wrong firmware (must be `calibration`), not DISARMED, or the matching `ROBOT_ARM_ENABLED` / `ROBOT_DRIVE_ENABLED` flag is `0`; for motor commands also check board power and D0/D1 |
-| Calibration remains in Boot with the motor board disconnected | Fail-closed initialization is active. Motor output remains zero; reconnect D0/D1 and board power, then allow up to 2 seconds for the automatic retry |
-| `s`/`system` shows `BOOT`, `stage=retry_wait`, and `RX bytes=0` | Uno D0 has received no driver-board traffic. Check board power, common ground, TX → D0, and USB serial contention; relaxing the parser cannot fix this |
+| Calibration remains DISARMED and commands report `invalid state` with the motor board disconnected | Fail-closed initialization is active even though Boot is no longer a public state. Motor output remains zero; reconnect D0/D1 and board power, then allow up to 2 seconds for the automatic retry |
+| `s`/`system` shows `DISARMED`, `stage=retry_wait`, and `RX bytes=0` | Uno D0 has received no driver-board traffic and readiness is false. Check board power, common ground, TX → D0, and USB serial contention; relaxing the parser cannot fix this |
 | Both SET ACKs are listed but `encoder frames=0` | Commands reach the board and ACKs return, but the encoder-query response is not reaching the parser. Keep motor output disabled and inspect the D0 waveform/query timing |
 | `stage=ready` but firmware state is `FAULT` | Initialization succeeded and a later drive fault latched. Read the hexadecimal fault field, restore fresh feedback, then clear the fault; do not bypass it |
 | Motor spin acknowledged but nothing turns | Motor power supply off, or that channel has no motor plugged in |

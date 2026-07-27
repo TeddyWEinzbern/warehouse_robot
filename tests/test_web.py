@@ -175,8 +175,17 @@ class MinimalSafetySurfaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/api/parameter", javascript)
         self.assertNotIn("refresh_parameters", javascript)
         self.assertIn("data.fault_state_unsafe", javascript)
+        self.assertIn("data.ready_to_arm", javascript)
+        self.assertIn('id="arm-readiness">NOT READY', html)
+        self.assertIn('setAction(primary, "ARMED", "", false)', javascript)
+        self.assertIn('"CLEAR FAULT", "clear_fault", connected && fresh', javascript)
+        self.assertIn(
+            'setAction($("disarm-action"), "DISARM", "disarm", connected)',
+            javascript,
+        )
+        self.assertNotIn("estop", (html + javascript + stylesheet).lower())
         self.assertIn(".button.arm:hover:not(:disabled)", stylesheet)
-        self.assertIn(".button.estop:hover:not(:disabled)", stylesheet)
+        self.assertIn(".button.disarm:hover:not(:disabled)", stylesheet)
 
     async def test_only_safety_actions_are_exposed(self):
         class ActionRuntime:
@@ -192,7 +201,7 @@ class MinimalSafetySurfaceTests(unittest.IsolatedAsyncioTestCase):
             def snapshot_json(self):
                 return "{}"
 
-            def submit(self, action):
+            def submit_webui(self, action, payload=None):
                 self.actions.append(action)
                 return True
 
@@ -204,9 +213,19 @@ class MinimalSafetySurfaceTests(unittest.IsolatedAsyncioTestCase):
         port = site._server.sockets[0].getsockname()[1]
         try:
             async with ClientSession() as session:
-                accepted = await session.post(
+                for action in ("arm", "disarm", "clear_fault"):
+                    accepted = await session.post(
+                        f"http://127.0.0.1:{port}/api/action",
+                        json={"action": action},
+                    )
+                    self.assertEqual(accepted.status, 200)
+                removed_estop = await session.post(
                     f"http://127.0.0.1:{port}/api/action",
                     json={"action": "estop"},
+                )
+                removed_clear_estop = await session.post(
+                    f"http://127.0.0.1:{port}/api/action",
+                    json={"action": "clear_estop"},
                 )
                 removed = await session.post(
                     f"http://127.0.0.1:{port}/api/action",
@@ -216,10 +235,14 @@ class MinimalSafetySurfaceTests(unittest.IsolatedAsyncioTestCase):
                     f"http://127.0.0.1:{port}/api/parameter",
                     json={"group": "SERVO", "values": {}},
                 )
-                self.assertEqual(accepted.status, 200)
+                self.assertEqual(removed_estop.status, 400)
+                self.assertEqual(removed_clear_estop.status, 400)
                 self.assertEqual(removed.status, 400)
                 self.assertEqual(parameter.status, 404)
-                self.assertEqual(runtime.actions, ["estop"])
+                self.assertEqual(
+                    runtime.actions,
+                    ["arm", "disarm", "clear_fault"],
+                )
         finally:
             await runner.cleanup()
 

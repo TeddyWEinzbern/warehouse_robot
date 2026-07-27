@@ -17,8 +17,8 @@ from robot_control.protocol import (
     encode_cal_joint_reference,
     encode_cal_read_drive,
     encode_control_frame,
-    encode_estop,
     encode_message,
+    encode_urgent_disarm,
 )
 
 
@@ -80,11 +80,11 @@ class CompactControlTests(unittest.TestCase):
         self.assertEqual(decoded.gripper, 1)
         self.assertEqual(decoded.buttons, 0x21)
 
-    def test_dedicated_estop_is_four_wire_bytes_and_wraps_sequence(self):
-        packet = encode_estop(66)
+    def test_urgent_disarm_is_four_wire_bytes_and_wraps_sequence(self):
+        packet = encode_urgent_disarm(66)
         self.assertEqual(len(packet), 4)
         message = decode_message(packet)
-        self.assertEqual(message.message_type, MessageType.ESTOP_ASSERT)
+        self.assertEqual(message.message_type, MessageType.URGENT_DISARM)
         self.assertEqual(message.sequence, 2)
         self.assertEqual(message.payload, b"")
 
@@ -103,13 +103,13 @@ class CompactControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "six defined"):
             encode_control_frame(ControlFrame(sequence=1, buttons=0x40))
 
-    def test_estop_is_not_repeated_in_control_schema(self):
+    def test_urgent_disarm_is_not_repeated_in_control_schema(self):
         self.assertFalse(hasattr(protocol, "ControlFlag"))
         self.assertNotIn("control_flags", ControlFrame.__dataclass_fields__)
 
 
 class GenericEnvelopeTests(unittest.TestCase):
-    def test_generic_v3_round_trip(self):
+    def test_generic_v4_round_trip(self):
         packet = encode_message(MessageType.HELLO, 0xA5)
         message = decode_message(packet)
         self.assertEqual(message.message_type, MessageType.HELLO)
@@ -122,7 +122,7 @@ class GenericEnvelopeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_message(bytes(packet))
         with self.assertRaisesRegex(ValueError, "unknown"):
-            decode_message(raw_frame(bytes((3, 0x77, 1, 0))))
+            decode_message(raw_frame(bytes((4, 0x77, 1, 0))))
 
     def test_decoder_discards_oversized_packet_until_delimiter(self):
         decoder = ProtocolDecoder(maximum_encoded_length=8)
@@ -160,8 +160,12 @@ class ReplyDecodeTests(unittest.TestCase):
         self.assertEqual(decoded["driver_mode"], 2)
         self.assertEqual(decoded["baud"], 9600)
 
-    def test_critical_status_has_only_safety_and_link_fields(self):
-        payload = bytes((3,)) + struct.pack("<HH", 0x0101, 0x0002) + bytes((62, 1))
+    def test_critical_status_decodes_link_and_ready_flags(self):
+        payload = (
+            bytes((2,))
+            + struct.pack("<HH", 0x0101, 0x0002)
+            + bytes((62, 0x03))
+        )
         decoded = decode_message_data(
             decode_message(
                 encode_message(MessageType.CRITICAL_STATUS, 7, payload)
@@ -171,13 +175,43 @@ class ReplyDecodeTests(unittest.TestCase):
             decoded,
             {
                 "kind": "critical_status",
-                "state": 3,
+                "state": 2,
                 "faults": 0x0101,
                 "warnings": 0x0002,
                 "last_accepted_control_sequence": 62,
                 "link_alive": True,
+                "ready_to_arm": True,
             },
         )
+
+    def test_critical_status_flags_are_independent(self):
+        for flags, link_alive, ready_to_arm in (
+            (0, False, False),
+            (1, True, False),
+            (2, False, True),
+        ):
+            with self.subTest(flags=flags):
+                payload = bytes((0, 0, 0, 0, 0, 0, flags))
+                decoded = decode_message_data(
+                    decode_message(
+                        encode_message(
+                            MessageType.CRITICAL_STATUS, 8, payload
+                        )
+                    )
+                )
+                self.assertEqual(decoded["link_alive"], link_alive)
+                self.assertEqual(decoded["ready_to_arm"], ready_to_arm)
+
+    def test_reserved_critical_status_flags_are_rejected(self):
+        payload = bytes((0, 0, 0, 0, 0, 0, 0x04))
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            decode_message_data(
+                decode_message(
+                    encode_message(
+                        MessageType.CRITICAL_STATUS, 9, payload
+                    )
+                )
+            )
 
     def test_calibration_reports_decode_on_demand_pages(self):
         counts = (

@@ -1,6 +1,6 @@
-"""Compact protocol v3 framing and typed robot-control messages.
+"""Compact protocol v4 framing and typed robot-control messages.
 
-Normal control and emergency-stop frames use fixed short layouts.  Rare
+Normal control and urgent-disarm frames use fixed short layouts.  Rare
 commands, critical status, and calibration request/reply traffic use the
 generic versioned envelope.
 """
@@ -13,7 +13,7 @@ import math
 import struct
 from typing import Any
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 MAX_PAYLOAD = 27
 MAX_ENCODED_LENGTH = 36
 
@@ -23,9 +23,9 @@ class MessageType(IntEnum):
     CONTROL = 0x02
     ARM = 0x03
     DISARM = 0x04
-    CLEAR_ESTOP = 0x05
+    # 0x05 is a retired operation and remains permanently reserved.
     CLEAR_FAULT = 0x06
-    ESTOP_ASSERT = 0x07  # Synthetic type for the dedicated fast frame.
+    URGENT_DISARM = 0x07  # Synthetic type for the dedicated fast frame.
 
     CAL_ARM_MOVE = 0x10
     CAL_SET_JOINT_REFERENCE = 0x11
@@ -170,7 +170,7 @@ def _frame(raw_without_crc: bytes) -> bytes:
 def encode_message(
     message_type: MessageType, sequence: int, payload: bytes = b""
 ) -> bytes:
-    if message_type in (MessageType.CONTROL, MessageType.ESTOP_ASSERT):
+    if message_type in (MessageType.CONTROL, MessageType.URGENT_DISARM):
         raise ValueError("use the dedicated fast-frame encoder")
     if len(payload) > MAX_PAYLOAD:
         raise ValueError(f"payload exceeds {MAX_PAYLOAD} bytes")
@@ -199,8 +199,8 @@ def decode_message(packet: bytes) -> Message:
         return Message(MessageType.CONTROL, raw[0] & 0x3F, raw[1:8])
     if discriminator == 0x80:
         if len(raw) != 2:
-            raise ValueError("invalid emergency-stop frame length")
-        return Message(MessageType.ESTOP_ASSERT, raw[0] & 0x3F, b"")
+            raise ValueError("invalid urgent-disarm frame length")
+        return Message(MessageType.URGENT_DISARM, raw[0] & 0x3F, b"")
     if len(raw) < 5:
         raise ValueError("invalid generic frame length")
     version, raw_type, sequence, payload_length = raw[:4]
@@ -319,7 +319,7 @@ def decode_control_frame(packet: bytes) -> ControlFrame:
     )
 
 
-def encode_estop(sequence: int) -> bytes:
+def encode_urgent_disarm(sequence: int) -> bytes:
     return _frame(bytes((0x80 | (sequence & 0x3F),)))
 
 
@@ -380,7 +380,7 @@ def encode_cal_read_drive(sequence: int, page: int) -> bytes:
 
 
 def decode_message_data(message: Message) -> dict[str, Any]:
-    """Decode the small set of host-visible v3 replies into named fields."""
+    """Decode the small set of host-visible v4 replies into named fields."""
 
     payload = message.payload
     if message.message_type == MessageType.HELLO_RESPONSE and len(payload) == 8:
@@ -396,13 +396,17 @@ def decode_message_data(message: Message) -> dict[str, Any]:
             "baud": payload[7] * 1200,
         }
     if message.message_type == MessageType.CRITICAL_STATUS and len(payload) == 7:
+        flags = payload[6]
+        if flags & ~0x03:
+            raise ValueError("reserved critical-status flag bits are set")
         return {
             "kind": "critical_status",
             "state": payload[0],
             "faults": int.from_bytes(payload[1:3], "little"),
             "warnings": int.from_bytes(payload[3:5], "little"),
             "last_accepted_control_sequence": payload[5],
-            "link_alive": bool(payload[6]),
+            "link_alive": bool(flags & 0x01),
+            "ready_to_arm": bool(flags & 0x02),
         }
     if message.message_type == MessageType.CAL_REPORT and payload:
         kind = payload[0]

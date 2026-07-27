@@ -128,8 +128,47 @@ void test_calibration_commands_match_the_firmware_profile() {
     );
 }
 
+#if ROBOT_CALIBRATION
+void test_disarm_discards_pending_calibration_actuator_commands() {
+    CommunicationSubsystem communication;
+    const uint8_t armMove[] = {2, 90};
+    const uint8_t reference[] = {1, 20, 160, 0xFD, 1};
+    const uint8_t spin[] = {1, 2, 0xD4, 0xFE, 0xF4, 0x01};
+    deliver(
+        communication, MessageType::CalibrationArmMove,
+        11, armMove, sizeof(armMove)
+    );
+    deliver(
+        communication, MessageType::CalibrationSetJointReference,
+        12, reference, sizeof(reference)
+    );
+    deliver(
+        communication, MessageType::CalibrationDriveSpin,
+        13, spin, sizeof(spin)
+    );
+    deliver(communication, MessageType::Disarm, 14, 0, 0);
+
+    TEST_ASSERT_EQUAL_UINT8(
+        RequestDisarm, communication.takeRequests().flags
+    );
+    PendingArmMove pendingArm = {};
+    PendingJointReference pendingReference = {};
+    PendingDriveCalibration pendingSpin = {};
+    TEST_ASSERT_FALSE(communication.takeArmMove(pendingArm));
+    TEST_ASSERT_FALSE(
+        communication.takeJointReference(pendingReference)
+    );
+    TEST_ASSERT_FALSE(
+        communication.takeDriveCalibration(pendingSpin)
+    );
+}
+#endif
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_calibration_commands_match_the_firmware_profile);
+#if ROBOT_CALIBRATION
+    RUN_TEST(test_disarm_discards_pending_calibration_actuator_commands);
+#endif
     return UNITY_END();
 }

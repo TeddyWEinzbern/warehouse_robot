@@ -65,6 +65,7 @@ class RobotApplication {
     RobotState previousState_;
     RobotState lastStatusState_;
     bool lastStatusLinkAlive_;
+    bool lastStatusReadyToArm_;
     bool statusPending_;
     bool helloPending_;
     bool platformInitialized_;
@@ -77,6 +78,7 @@ class RobotApplication {
     bool armMotionEnabled() const;
     bool hostTransmitSafe(uint32_t nowUs) const;
 #if ROBOT_CALIBRATION
+    bool calibrationPlatformReady(uint32_t nowMs) const;
     void processHostMessages(uint32_t nowMs);
 #endif
     void enforceSafetyStop(uint32_t nowMs);

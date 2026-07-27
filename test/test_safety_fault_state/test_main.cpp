@@ -97,7 +97,7 @@ void test_unsafe_disarmed_faults_can_be_explicitly_cleared() {
 
     frame.receivedAtMs = 500;
     safety.update(
-        frame, {RequestClearFault}, healthyDrive(FaultDriveStall),
+        frame, {RequestClearFault}, healthyDrive(),
         true, true, 500
     );
     TEST_ASSERT_EQUAL_UINT16(0, safety.faults());
@@ -108,15 +108,33 @@ void test_unsafe_disarmed_faults_can_be_explicitly_cleared() {
     );
 }
 
-void test_unsafe_fault_bypass_does_not_bypass_estop_or_link_loss() {
+void test_unsafe_fault_bypass_does_not_bypass_disarm_or_link_loss() {
     SafetySupervisor safety;
     qualifyAndArm(safety);
     OperatorControlFrame frame = neutralFrame(501);
     safety.update(
-        frame, {RequestEStop}, healthyDrive(FaultDriveStall),
+        frame, {RequestDisarm}, healthyDrive(FaultDriveStall),
         true, true, 501
     );
-    TEST_ASSERT_TRUE(safety.emergencyStopped());
+    TEST_ASSERT_FALSE(safety.armed());
+    TEST_ASSERT_TRUE(safety.takeImmediateStop());
+#if ROBOT_FAULT_STATE_UNSAFE
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RobotState::Disarmed),
+        static_cast<uint8_t>(safety.state())
+    );
+    frame = neutralFrame(1001);
+    safety.update(
+        frame, {RequestArm}, healthyDrive(), true, true, 1001
+    );
+    TEST_ASSERT_FALSE(safety.armed());
+    TEST_ASSERT_FALSE(safety.readyToArm());
+#else
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RobotState::Fault),
+        static_cast<uint8_t>(safety.state())
+    );
+#endif
 
     SafetySupervisor linkSafety;
     qualifyAndArm(linkSafety);
@@ -137,6 +155,36 @@ void test_unsafe_fault_bypass_does_not_bypass_estop_or_link_loss() {
 #endif
 }
 
+void test_clear_fault_requires_recovered_feedback() {
+    SafetySupervisor safety;
+    OperatorControlFrame frame = neutralFrame(0);
+    const DriveHealth staleButBypassed = {
+        FaultEncoderStale,
+        static_cast<uint16_t>(
+            WarningFaultStateUnsafe | WarningEncoderTimeoutIgnored
+        ),
+        true, true, true
+    };
+    safety.update(
+        frame, {0}, staleButBypassed, true, true, 0
+    );
+    frame.receivedAtMs = 500;
+    safety.update(
+        frame, {RequestClearFault}, staleButBypassed,
+        true, true, 500
+    );
+    TEST_ASSERT_EQUAL_HEX16(FaultEncoderStale, safety.faults());
+    TEST_ASSERT_FALSE(safety.takeClearFaultAccepted());
+
+    frame.receivedAtMs = 501;
+    safety.update(
+        frame, {RequestClearFault}, healthyDrive(),
+        true, true, 501
+    );
+    TEST_ASSERT_EQUAL_UINT16(0, safety.faults());
+    TEST_ASSERT_TRUE(safety.takeClearFaultAccepted());
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(
@@ -144,6 +192,9 @@ int main(int, char **) {
     );
     RUN_TEST(test_latch_fault_uses_the_same_unsafe_state_policy);
     RUN_TEST(test_unsafe_disarmed_faults_can_be_explicitly_cleared);
-    RUN_TEST(test_unsafe_fault_bypass_does_not_bypass_estop_or_link_loss);
+    RUN_TEST(
+        test_unsafe_fault_bypass_does_not_bypass_disarm_or_link_loss
+    );
+    RUN_TEST(test_clear_fault_requires_recovered_feedback);
     return UNITY_END();
 }

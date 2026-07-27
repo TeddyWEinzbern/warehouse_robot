@@ -11,6 +11,7 @@ from robot_control.protocol import (
     decode_message,
     encode_control_frame,
     encode_message,
+    encode_urgent_disarm,
 )
 from robot_control.runtime import (
     CONTROL_RATE_HZ,
@@ -29,15 +30,17 @@ def hello_response(sequence=1, baud=9600, profile=3):
 def critical_status(
     sequence=2,
     *,
-    state=3,
+    state=0,
     faults=0,
     warnings=0,
     last_control=0xFF,
     link_alive=True,
+    ready_to_arm=False,
 ):
     payload = bytes((state,))
     payload += struct.pack("<HH", faults, warnings)
-    payload += bytes((last_control, int(link_alive)))
+    flags = int(link_alive) | (int(ready_to_arm) << 1)
+    payload += bytes((last_control, flags))
     return encode_message(MessageType.CRITICAL_STATUS, sequence, payload)
 
 
@@ -89,7 +92,7 @@ class FakeSerial:
                     hello_response(
                         message.sequence, self.baud, self.profile
                     )
-                    + critical_status(message.sequence, state=3)
+                    + critical_status(message.sequence, state=0)
                 )
                 self.answer_hello = False
         return len(data)
@@ -132,7 +135,7 @@ class StatusNameTests(unittest.TestCase):
 
 
 class RuntimeHandshakeTests(unittest.TestCase):
-    def test_handshake_starts_with_redundant_estop_then_neutral_control(self):
+    def test_handshake_starts_with_urgent_disarm_then_neutral_control(self):
         link = FakeSerial()
         runtime = RobotRuntime(
             "fake",
@@ -148,12 +151,11 @@ class RuntimeHandshakeTests(unittest.TestCase):
 
         messages = [decode_message(packet) for packet in link.writes]
         self.assertEqual(
-            [message.message_type for message in messages[:5]],
+            [message.message_type for message in messages[:4]],
             [
-                MessageType.ESTOP_ASSERT,
-                MessageType.ESTOP_ASSERT,
-                MessageType.ESTOP_ASSERT,
-                MessageType.DISARM,
+                MessageType.URGENT_DISARM,
+                MessageType.URGENT_DISARM,
+                MessageType.URGENT_DISARM,
                 MessageType.HELLO,
             ],
         )
@@ -246,7 +248,10 @@ class RuntimeHandshakeTests(unittest.TestCase):
                     for index, message in enumerate(messages)
                     if message.message_type == MessageType.CONTROL
                 )
-                minimum_drain = 26 * 10.0 / baud
+                minimum_drain = (
+                    3 * len(encode_urgent_disarm(0))
+                    + len(encode_message(MessageType.HELLO, 0))
+                ) * 10.0 / baud
                 self.assertGreaterEqual(
                     link.write_times[control_index]
                     - link.write_times[hello_index],
@@ -263,7 +268,7 @@ class RuntimeHandshakeTests(unittest.TestCase):
         self.assertAlmostEqual(next_deadline, 0.025 + period)
         self.assertGreaterEqual(next_deadline - 0.025, period)
 
-    def test_mid_period_estop_restarts_wire_safe_control_spacing(self):
+    def test_mid_period_disarm_restarts_wire_safe_control_spacing(self):
         timeline = ManualClock()
         link = FakeSerial(answer_hello=False)
         runtime = RobotRuntime(
@@ -285,7 +290,7 @@ class RuntimeHandshakeTests(unittest.TestCase):
         self.assertTrue(runtime._write(control))
 
         timeline.advance(0.030)
-        self.assertTrue(runtime._send_estop_burst())
+        self.assertTrue(runtime._send_urgent_disarm_burst())
         nominal_deadline = first_start + 1.0 / CONTROL_RATE_HZ
         delayed_start = runtime._control_ready_at(nominal_deadline)
         self.assertGreater(delayed_start, nominal_deadline)
@@ -306,7 +311,7 @@ class RuntimeHandshakeTests(unittest.TestCase):
             0.0218,
         )
 
-    def test_handshake_mid_period_estop_defers_next_bootstrap_control(self):
+    def test_handshake_mid_period_disarm_defers_next_bootstrap_control(self):
         timeline = ManualClock()
         link = FakeSerial(answer_hello=False)
         runtime = RobotRuntime(
@@ -326,7 +331,7 @@ class RuntimeHandshakeTests(unittest.TestCase):
         self.assertIsNotNone(nominal_deadline)
 
         timeline.advance(0.030)
-        self.assertTrue(runtime._send_estop_burst())
+        self.assertTrue(runtime._send_urgent_disarm_burst())
         timeline.advance(nominal_deadline - timeline())
         self.assertFalse(runtime._bootstrap_control_ready(timeline()))
 
@@ -366,7 +371,7 @@ class RuntimeHandshakeTests(unittest.TestCase):
             0.025 + 1.0 / CONTROL_RATE_HZ,
         )
 
-    def test_handshake_timeout_is_fail_closed_and_mentions_v3_reply(self):
+    def test_handshake_timeout_is_fail_closed_and_mentions_reply(self):
         links = []
 
         def factory(*_args):
@@ -425,9 +430,80 @@ class RuntimeHandshakeTests(unittest.TestCase):
             runtime.snapshot()["fatal_error"],
         )
 
+    def test_stale_status_sends_urgent_disarm_before_disconnect(self):
+        link = FakeSerial()
+        runtime = RobotRuntime(
+            "fake",
+            use_gamepad=False,
+            serial_factory=lambda *_: link,
+            maximum_reconnect_attempts=1,
+            startup_stabilization_seconds=0.0,
+        )
+        with patch(
+            "robot_control.runtime.CRITICAL_STATUS_STALE_SECONDS", 0.05
+        ):
+            runtime.start()
+            self.assertTrue(
+                wait_for(lambda: runtime.snapshot()["connected"])
+            )
+            self.assertTrue(
+                wait_for(
+                    lambda: bool(runtime.snapshot()["fatal_error"]),
+                    timeout=0.5,
+                )
+            )
+            runtime.stop()
+        types = [
+            decode_message(packet).message_type for packet in link.writes
+        ]
+        self.assertGreaterEqual(
+            types.count(MessageType.URGENT_DISARM), 6
+        )
+        self.assertIn("heartbeat became stale", runtime.snapshot()["fatal_error"])
+
 
 class RuntimeSafetyTests(unittest.TestCase):
-    def make_connected_runtime(self):
+    class FakeEvent:
+        @staticmethod
+        def pump():
+            pass
+
+    class FakePygame:
+        event = None
+
+    class FakeJoystick:
+        def __init__(self, pressed_button=None, *, connected=True, axes=None):
+            self.buttons = [0] * 8
+            if pressed_button is not None:
+                self.buttons[pressed_button] = 1
+            self.connected = connected
+            self.axes = axes or {}
+
+        def get_init(self):
+            return self.connected
+
+        @staticmethod
+        def get_name():
+            return "test controller"
+
+        def get_axis(self, index):
+            return self.axes.get(index, -1.0 if index in (4, 5) else 0.0)
+
+        def get_numbuttons(self):
+            return len(self.buttons)
+
+        def get_button(self, index):
+            return self.buttons[index]
+
+        @staticmethod
+        def get_numhats():
+            return 1
+
+        @staticmethod
+        def get_hat(_):
+            return (0, 0)
+
+    def make_connected_runtime(self, *, ready_to_arm=True):
         link = FakeSerial(answer_hello=False)
         runtime = RobotRuntime(
             "fake", use_gamepad=True, serial_factory=lambda *_: link
@@ -436,64 +512,39 @@ class RuntimeSafetyTests(unittest.TestCase):
         runtime._connected = True
         runtime._link_verified = True
         runtime._link_state = "connected"
+        runtime._hello = {
+            "arm_enabled": True,
+            "arm_calibrated": True,
+            "drive_enabled": True,
+            "drive_calibrated": True,
+        }
         runtime._critical_status = {
-            "state": 3,
+            "state": 0,
             "faults": 0,
             "warnings": 0,
             "last_accepted_control_sequence": 0xFF,
             "link_alive": True,
+            "ready_to_arm": ready_to_arm,
         }
         runtime._last_status_at = runtime.clock()
+        runtime._disarm_pending_confirmation = False
         return runtime, link
 
-    def test_menu_button_queues_one_arm_request_without_estop(self):
-        class FakeEvent:
-            @staticmethod
-            def pump():
-                pass
+    def attach_controller(self, runtime, pressed_button=None, **kwargs):
+        self.FakePygame.event = self.FakeEvent()
+        runtime._pygame = self.FakePygame()
+        runtime._joystick = self.FakeJoystick(
+            pressed_button, **kwargs
+        )
 
-        class FakePygame:
-            event = FakeEvent()
-
-        class FakeJoystick:
-            def __init__(self):
-                self.buttons = [0] * 8
-                self.buttons[7] = 1
-
-            @staticmethod
-            def get_init():
-                return True
-
-            @staticmethod
-            def get_name():
-                return "test controller"
-
-            @staticmethod
-            def get_axis(index):
-                return -1.0 if index in (4, 5) else 0.0
-
-            def get_numbuttons(self):
-                return len(self.buttons)
-
-            def get_button(self, index):
-                return self.buttons[index]
-
-            @staticmethod
-            def get_numhats():
-                return 1
-
-            @staticmethod
-            def get_hat(_):
-                return (0, 0)
-
+    def test_menu_button_queues_one_arm_request_only_with_fresh_ready(self):
         runtime, _ = self.make_connected_runtime()
-        runtime._pygame = FakePygame()
-        runtime._joystick = FakeJoystick()
+        self.attach_controller(runtime, runtime._control_config.arm_button)
 
         runtime._read_controller()
         self.assertEqual(runtime._commands.qsize(), 1)
         self.assertEqual(runtime._commands.get_nowait().action, "arm")
-        self.assertFalse(runtime._critical_estop.is_set())
+        self.assertFalse(runtime._urgent_disarm.is_set())
         self.assertEqual(
             runtime._events[-1]["message"], "Controller Menu requested ARM"
         )
@@ -501,97 +552,112 @@ class RuntimeSafetyTests(unittest.TestCase):
         runtime._read_controller()
         self.assertTrue(runtime._commands.empty())
 
-    def test_estop_priority_path_sends_three_dedicated_fast_frames(self):
+        not_ready, _ = self.make_connected_runtime(ready_to_arm=False)
+        self.attach_controller(
+            not_ready, not_ready._control_config.arm_button
+        )
+        not_ready._read_controller()
+        self.assertTrue(not_ready._commands.empty())
+        self.assertIn("requires fresh firmware READY", not_ready._events[-1]["message"])
+
+    def test_view_button_requests_one_queue_bypassing_urgent_disarm(self):
+        runtime, link = self.make_connected_runtime()
+        self.assertTrue(runtime.submit("arm"))
+        self.assertTrue(runtime.submit_webui("clear_fault"))
+        self.attach_controller(runtime, runtime._control_config.disarm_button)
+
+        runtime._read_controller()
+        self.assertTrue(runtime._commands.empty())
+        self.assertTrue(runtime._urgent_disarm.is_set())
+        runtime._drain_commands()
+        self.assertEqual(
+            [decode_message(packet).message_type for packet in link.writes],
+            [MessageType.URGENT_DISARM] * 3,
+        )
+
+        runtime._read_controller()
+        runtime._drain_commands()
+        self.assertEqual(len(link.writes), 3)
+        self.assertEqual(
+            sum(
+                event["message"] == "Controller View requested DISARM"
+                for event in runtime._events
+            ),
+            1,
+        )
+
+    def test_queue_full_cannot_block_urgent_disarm(self):
         runtime, link = self.make_connected_runtime()
         for _ in range(32):
-            self.assertTrue(runtime.submit("disarm"))
-        self.assertTrue(runtime.submit("estop"))
+            self.assertTrue(runtime.submit("arm"))
+        self.assertFalse(runtime.submit("arm"))
+        self.assertTrue(runtime.submit("disarm"))
+        self.assertTrue(runtime._commands.empty())
         runtime._drain_commands()
-        types = [decode_message(packet).message_type for packet in link.writes]
-        self.assertEqual(types[:3], [MessageType.ESTOP_ASSERT] * 3)
-        self.assertTrue(runtime.snapshot()["host_estop_latched"])
+        self.assertEqual(
+            [decode_message(packet).message_type for packet in link.writes],
+            [MessageType.URGENT_DISARM] * 3,
+        )
 
-    def test_estop_discards_older_queued_clear_intent(self):
+    def test_urgent_disarm_discards_older_arm_and_clear_fault_intent(self):
         runtime, link = self.make_connected_runtime()
-        self.assertTrue(runtime.submit("clear_estop"))
-        self.assertTrue(runtime.submit("estop"))
-        runtime._drain_commands()
+        runtime._pending_neutral_action = MessageType.ARM
+        self.assertTrue(runtime.submit("arm"))
+        self.assertTrue(runtime.submit_webui("clear_fault"))
+        self.assertTrue(runtime.submit("disarm"))
         self.assertTrue(runtime._commands.empty())
         self.assertIsNone(runtime._pending_neutral_action)
-        runtime._neutral_since = runtime.clock() - 1.0
-        runtime._send_control(runtime.clock())
-        message_types = [
-            decode_message(packet).message_type for packet in link.writes
-        ]
-        self.assertEqual(
-            message_types[:3], [MessageType.ESTOP_ASSERT] * 3
-        )
-        self.assertNotIn(MessageType.CLEAR_ESTOP, message_types)
-
-    def test_estop_retries_until_firmware_reports_estop(self):
-        runtime, link = self.make_connected_runtime()
-        runtime._critical_status["state"] = 1
-        runtime._estop_retry_at = 0.0
-        runtime._retry_estop_if_needed(runtime.clock())
+        runtime._drain_commands()
         self.assertEqual(
             [decode_message(packet).message_type for packet in link.writes],
-            [MessageType.ESTOP_ASSERT] * 3,
+            [MessageType.URGENT_DISARM] * 3,
         )
-        runtime._critical_status["state"] = 3
-        runtime._estop_retry_at = 0.0
-        runtime._retry_estop_if_needed(runtime.clock())
-        self.assertEqual(len(link.writes), 3)
 
-    def test_disarm_follows_a_neutral_control_frame(self):
+    def test_motion_stays_suppressed_until_non_armed_status_confirmation(self):
         runtime, link = self.make_connected_runtime()
-        runtime._process_command(RuntimeCommand(1, 0, "disarm"))
-        self.assertEqual(link.writes, [])
-        runtime._send_control(runtime.clock())
-        messages = [decode_message(packet) for packet in link.writes]
-        self.assertEqual(
-            [message.message_type for message in messages],
-            [MessageType.CONTROL, MessageType.DISARM],
+        self.attach_controller(
+            runtime,
+            axes={runtime._control_config.drive_forward.axis: -1.0},
         )
-        self.assertTrue(decode_control_frame(link.writes[0]).neutral())
-
-    def test_clear_estop_stays_latched_until_fresh_disarmed_status(self):
-        runtime, link = self.make_connected_runtime()
-        runtime._process_command(RuntimeCommand(5, 0, "clear_estop"))
-        self.assertTrue(runtime._host_estop_latched)
-        self.assertEqual(
-            runtime._pending_neutral_action, MessageType.CLEAR_ESTOP
-        )
-
-        runtime._neutral_since = runtime.clock() - 1.0
-        runtime._send_control(runtime.clock())
-        self.assertTrue(runtime._awaiting_clear_estop)
-        self.assertTrue(runtime._host_estop_latched)
-        self.assertIn(
-            MessageType.CLEAR_ESTOP,
-            [decode_message(packet).message_type for packet in link.writes],
-        )
-
+        runtime.submit("disarm")
+        runtime._drain_commands()
+        self.assertTrue(runtime._current_control().neutral())
         runtime._handle_message(
             decode_message(critical_status(state=1, last_control=0)),
             runtime.clock(),
         )
-        self.assertFalse(runtime._awaiting_clear_estop)
-        self.assertFalse(runtime._host_estop_latched)
-
-    def test_clear_estop_nack_remains_latched_and_retryable(self):
-        runtime, _ = self.make_connected_runtime()
-        runtime._awaiting_clear_estop = True
+        self.assertTrue(runtime._disarm_pending_confirmation)
+        self.assertTrue(runtime._current_control().neutral())
         runtime._handle_message(
-            decode_message(
-                encode_message(
-                    MessageType.NACK,
-                    4,
-                    bytes((MessageType.CLEAR_ESTOP, 4)),
-                )
-            )
+            decode_message(critical_status(state=2, last_control=0)),
+            runtime.clock(),
         )
-        self.assertTrue(runtime._host_estop_latched)
-        self.assertFalse(runtime._awaiting_clear_estop)
+        self.assertFalse(runtime._disarm_pending_confirmation)
+        self.assertFalse(runtime._current_control().neutral())
+        self.assertEqual(
+            [decode_message(packet).message_type for packet in link.writes],
+            [MessageType.URGENT_DISARM] * 3,
+        )
+
+    def test_controller_disconnect_sends_disarm_before_any_control(self):
+        runtime, link = self.make_connected_runtime()
+        self.attach_controller(runtime, connected=False)
+        self.assertIsNone(runtime._send_control(runtime.clock()))
+        self.assertEqual(
+            [decode_message(packet).message_type for packet in link.writes],
+            [MessageType.URGENT_DISARM] * 3,
+        )
+        self.assertFalse(runtime._urgent_disarm.is_set())
+        self.assertTrue(runtime._disarm_pending_confirmation)
+
+    def test_view_disarm_sends_before_any_control(self):
+        runtime, link = self.make_connected_runtime()
+        self.attach_controller(runtime, runtime._control_config.disarm_button)
+        self.assertIsNone(runtime._send_control(runtime.clock()))
+        self.assertEqual(
+            [decode_message(packet).message_type for packet in link.writes],
+            [MessageType.URGENT_DISARM] * 3,
+        )
 
     def test_no_gamepad_runtime_refuses_arm(self):
         runtime = RobotRuntime(
@@ -599,9 +665,14 @@ class RuntimeSafetyTests(unittest.TestCase):
         )
         runtime._connected = True
         runtime._link_verified = True
-        runtime._critical_status = {"state": 1, "faults": 0}
+        runtime._critical_status = {
+            "state": 0,
+            "faults": 0,
+            "link_alive": True,
+            "ready_to_arm": True,
+        }
         runtime._last_status_at = runtime.clock()
-        runtime._host_estop_latched = False
+        runtime._disarm_pending_confirmation = False
         runtime._process_command(RuntimeCommand(5, 0, "arm"))
         self.assertIsNone(runtime._pending_neutral_action)
         self.assertIn("disabled", runtime._events[-1]["message"])
@@ -611,7 +682,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         runtime._publish_snapshot()
         fresh = runtime.snapshot()
         self.assertTrue(fresh["status_fresh"])
-        self.assertEqual(fresh["state_name"], "ESTOP")
+        self.assertEqual(fresh["state_name"], "DISARMED")
         with patch(
             "robot_control.runtime.CRITICAL_STATUS_STALE_SECONDS", 0.0
         ):
@@ -624,7 +695,7 @@ class RuntimeSafetyTests(unittest.TestCase):
     def test_fault_flag_rising_edge_records_one_named_timed_error(self):
         runtime, _ = self.make_connected_runtime()
         packet = decode_message(
-            critical_status(state=4, faults=0x000C, last_control=0)
+            critical_status(state=2, faults=0x000C, last_control=0)
         )
         with patch("robot_control.runtime.time.time", return_value=1234.5):
             runtime._handle_message(packet, runtime.clock())
@@ -641,7 +712,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertIn("new=0x000C, active=0x000C", fault_events[0]["message"])
 
         runtime._handle_message(
-            decode_message(critical_status(state=1, faults=0, last_control=0))
+            decode_message(critical_status(state=0, faults=0, last_control=0))
         )
         runtime._handle_message(packet)
         self.assertEqual(
@@ -655,10 +726,16 @@ class RuntimeSafetyTests(unittest.TestCase):
     def test_unsafe_disarmed_fault_can_queue_clear_fault(self):
         runtime, _ = self.make_connected_runtime()
         runtime._critical_status.update(
-            {"state": 1, "faults": 0x0040, "warnings": 0x0004}
+            {
+                "state": 0,
+                "faults": 0x0040,
+                "warnings": 0x0004,
+                "ready_to_arm": False,
+            }
         )
-        runtime._host_estop_latched = False
-        runtime._process_command(RuntimeCommand(6, 0, "clear_fault"))
+        self.assertFalse(runtime.submit("clear_fault"))
+        self.assertTrue(runtime.submit_webui("clear_fault"))
+        runtime._drain_commands()
         self.assertEqual(
             runtime._pending_neutral_action, MessageType.CLEAR_FAULT
         )
@@ -678,8 +755,9 @@ class RuntimeSafetyTests(unittest.TestCase):
             "drive_enabled": False,
             "drive_calibrated": False,
         }
-        runtime._critical_status.update({"state": 1, "link_alive": False})
-        runtime._host_estop_latched = False
+        runtime._critical_status.update(
+            {"state": 0, "link_alive": False, "ready_to_arm": True}
+        )
         runtime._publish_snapshot()
         self.assertFalse(runtime.snapshot()["arm_available"])
         self.assertFalse(
@@ -687,19 +765,56 @@ class RuntimeSafetyTests(unittest.TestCase):
                 MessageType.ARM, runtime.clock()
             )
         )
+        runtime._handle_message(
+            decode_message(
+                critical_status(
+                    state=0, link_alive=False, ready_to_arm=True
+                )
+            ),
+            runtime.clock(),
+        )
+        self.assertTrue(runtime._urgent_disarm.is_set())
 
-    def test_shutdown_sends_estop_burst_and_disarm(self):
+    def test_webui_only_clear_fault_sends_after_neutral_qualification(self):
+        runtime, link = self.make_connected_runtime()
+        runtime._critical_status.update(
+            {"state": 2, "faults": 0x0004, "ready_to_arm": False}
+        )
+        self.assertFalse(runtime.submit("clear_fault"))
+        self.assertTrue(runtime.submit_webui("clear_fault"))
+        runtime._drain_commands()
+        self.assertEqual(
+            runtime._pending_neutral_action, MessageType.CLEAR_FAULT
+        )
+        runtime._neutral_since = runtime.clock() - 1.0
+        with patch.object(
+            runtime,
+            "_read_controller",
+            return_value=ControlFrame(sequence=0),
+        ):
+            runtime._send_control(runtime.clock())
+        self.assertEqual(
+            [decode_message(packet).message_type for packet in link.writes],
+            [MessageType.CONTROL, MessageType.CLEAR_FAULT],
+        )
+
+    def test_shutdown_sends_only_urgent_disarm_burst(self):
         runtime, link = self.make_connected_runtime()
         runtime._best_effort_shutdown()
         self.assertTrue(link.closed)
         self.assertEqual(
             [decode_message(packet).message_type for packet in link.writes],
-            [MessageType.ESTOP_ASSERT] * 3 + [MessageType.DISARM],
+            [MessageType.URGENT_DISARM] * 3,
         )
 
     def test_removed_remote_operations_are_rejected(self):
         runtime, _ = self.make_connected_runtime()
-        for action in ("refresh_parameters", "set_host_input", "set_parameter"):
+        for action in (
+            "clear_fault",
+            "refresh_parameters",
+            "set_host_input",
+            "set_parameter",
+        ):
             self.assertFalse(runtime.submit(action))
         self.assertTrue(runtime._commands.empty())
 

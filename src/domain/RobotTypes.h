@@ -18,13 +18,15 @@ enum Button : uint16_t {
 enum RequestFlag : uint8_t {
     RequestArm = 1U << 0,
     RequestDisarm = 1U << 1,
-    RequestClearEStop = 1U << 2,
-    RequestClearFault = 1U << 3,
-    RequestHello = 1U << 4,
-    RequestEStop = 1U << 5,
+    RequestClearFault = 1U << 2,
+    RequestHello = 1U << 3,
 };
 
-enum class RobotState : uint8_t { Boot, Disarmed, Armed, EStop, Fault };
+enum class RobotState : uint8_t {
+    Disarmed = 0,
+    Armed = 1,
+    Fault = 2,
+};
 enum class RobotProfile : uint8_t {
     // Keep the established numeric identifiers without retaining retired
     // profile implementations or names.
@@ -181,7 +183,7 @@ struct RobotStatus {
     uint16_t commandAgeMs;
     bool cargoMayBeHeld;
     bool linkAlive;
-    bool emergencyStopped;
+    bool readyToArm;
     bool driveCalibrated;
 };
 

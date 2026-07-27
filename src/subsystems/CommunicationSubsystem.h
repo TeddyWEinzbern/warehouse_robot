@@ -7,13 +7,18 @@
 
 namespace robot {
 
-constexpr uint8_t ProtocolVersion = 3;
+constexpr uint8_t ProtocolVersion = 4;
+
+enum CriticalStatusFlag : uint8_t {
+    CriticalStatusLinkAlive = 1U << 0,
+    CriticalStatusReadyToArm = 1U << 1,
+};
 
 enum class MessageType : uint8_t {
     Hello = 0x01,
     Arm = 0x03,
     Disarm = 0x04,
-    ClearEStop = 0x05,
+    Reserved = 0x05,
     ClearFault = 0x06,
     CalibrationArmMove = 0x10,
     CalibrationSetJointReference = 0x11,
@@ -120,6 +125,7 @@ class CommunicationSubsystem {
     PendingJointReference jointReference_;
     PendingDriveCalibration driveCalibration_;
     PendingCalibrationRead calibrationRead_;
+    void cancelCalibrationActions();
 #endif
     uint8_t previousButtons_;
     uint8_t encoded_[MaximumEncoded];
